@@ -7,4 +7,14 @@ rust-version.workspace = true
 authors.workspace = true
 
 [dependencies]
+argon2 = { version = "0.6.0", features = ["password-hash", "rand_core"] }
+bcrypt = "0.19.3"
+hex.workspace = true
+jsonwebtoken = { version = "11.0.0", features = ["rust_crypto"] }
+rand.workspace = true
 rc-core = { workspace = true }
+rc-db = { version = "0.1.0", path = "../rc-db" }
+serde.workspace = true
+serde_json.workspace = true
+uuid = { workspace = true }
+sha2.workspace = true
