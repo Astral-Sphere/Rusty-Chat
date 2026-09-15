@@ -11,6 +11,9 @@
 //! - `repo::` — repositories (added per milestone)
 
 pub mod bootstrap;
+pub mod entity;
+pub mod history;
+pub mod repo;
 
 pub use rc_core::{COMPATIBLE_ALEMBIC_HEAD, Error, Result};
 

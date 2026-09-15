@@ -7,7 +7,7 @@ rust-version.workspace = true
 authors.workspace = true
 
 [dependencies]
-rc-core = { workspace = true }
+rc-core = { workspace = true, features = ["sea-orm"] }
 sea-orm = { workspace = true }
 sqlx = { workspace = true }
 serde = { workspace = true }

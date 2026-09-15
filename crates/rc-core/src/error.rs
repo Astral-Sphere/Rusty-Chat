@@ -22,3 +22,10 @@ pub enum Error {
     #[error("internal: {0}")]
     Internal(String),
 }
+
+#[cfg(feature = "sea-orm")]
+impl From<sea_orm::DbErr> for Error {
+    fn from(e: sea_orm::DbErr) -> Self {
+        Error::Internal(e.to_string())
+    }
+}

@@ -12,3 +12,8 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 time = { workspace = true }
+sea-orm = { workspace = true, optional = true }
+
+[features]
+# `sea-orm` enables `From<sea_orm::DbErr> for Error` so repositories can use `?`.
+sea-orm = ["dep:sea-orm"]

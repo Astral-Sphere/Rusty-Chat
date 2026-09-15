@@ -43,9 +43,9 @@
 - **理由**：40 表 CRUD 工作量、双方言由 sea-query 处理、泛型 JSON 列行为与 SQLAlchemy 一致。
 - 日期：2026-09-15
 
-## D-009 License 未定
-- 发布前决定。约束：链接 `openai-interface`（AGPL-3.0）分发需遵循 AGPL；当前未复制 open-webui 代码（其 LICENSE 已变更历史复杂），locale 仅取 zh/en 数据参考。
-- 日期：2026-09-15 记录
+## D-009 License 未定（但 AGPL 约束已解除）
+- 2026-09-16 更新：`openai-interface` 0.11.0-rc1 起**改为 MIT**（用户宣布），链接它不再强制 AGPL。整体 License 仍待定（发布前决定），当前未复制 open-webui 代码（其 LICENSE 历史复杂），locale 仅取 zh/en 数据参考。
+- 日期：2026-09-15 记录，2026-09-16 放宽
 
 ## D-010 v1 范围
 - v1 含：核心聊天、Ollama/OpenAI、RAG/知识库、文件、管理后台、用户组权限、Channels、Automations、Calendar、中英 i18n。
@@ -53,9 +53,9 @@
 - 日期：2026-09-15
 
 ## D-011 OpenAI 等 Web API 以独立 crate 形式沉淀
-- **决策**：OpenAI 兼容层基于用户维护的 `openai-interface`（Codeberg/Hammerklavier，当前 0.10.0，edition 2024，deepseek/qwen feature）；Ollama 客户端、搜索 loader 等同样按可独立发布标准设计（无服务器状态耦合）。缺口薄封装并向 crate 作者（即用户）反馈需求。
-- **注意**：AGPL 许可影响整体 License 决策（联动 D-009）；M1 接入时核对流式 SSE 解析、Responses API、audio/images/embeddings 覆盖面。
-- 日期：2026-09-15（用户主导修订）
+- **决策**：OpenAI 兼容层基于用户维护的 `openai-interface`（Codeberg/Hammerklavier；0.11.0-rc1 起 MIT，edition 2024，deepseek/qwen feature）；Ollama 客户端、搜索 loader 等同样按可独立发布标准设计（无服务器状态耦合）。缺口薄封装并向 crate 作者（即用户）反馈需求。
+- **注意**：M1 接入时核对流式 SSE 解析、Responses API、audio/images/embeddings 覆盖面。
+- 日期：2026-09-15（用户主导修订）；2026-09-16 版本与许可更新
 
 ## D-012 上下文压缩恢复协议
 - 对话上下文会多次压缩；每次压缩后必须先读 `docs/PROGRESS.md` → `DECISIONS.md` → `ARCHITECTURE.md`（涉兼容再读 `COMPATIBILITY.md`）→ `git log/status` 对账 → 相关代码，再继续。写入 AGENTS.md §1。
