@@ -1,0 +1,10 @@
+[package]
+name = "rc-rag"
+description = "Rusty-Chat RAG: chunking, embedding engines (fastembed/ollama/openai), hybrid BM25 search, reranking, vector stores (sqlite-vec/qdrant/pgvector), reindex CLI, document extraction"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[dependencies]
+rc-core = { workspace = true }

@@ -1,0 +1,10 @@
+[package]
+name = "rc-media"
+description = "Rusty-Chat media: STT (whisper-rs/openai/deepgram/azure), TTS (openai/elevenlabs/azure), image generation (openai/a1111/comfyui/gemini)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[dependencies]
+rc-core = { workspace = true }

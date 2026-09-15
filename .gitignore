@@ -24,3 +24,12 @@ target
 /open-webui
 # zed editor, reference for syntax highlight
 /zed
+
+# web (Dioxus) build artifacts
+/web/dist
+/node_modules
+
+# runtime data
+/data
+.webui_secret_key
+*.local.db

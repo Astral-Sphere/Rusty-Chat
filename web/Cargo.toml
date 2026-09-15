@@ -1,0 +1,20 @@
+[workspace]
+# Standalone workspace: builds for wasm32-unknown-unknown; excluded from the
+# root workspace to keep wasm-only dependency graphs from unifying with
+# native ones (see docs/ARCHITECTURE.md §5).
+
+[package]
+name = "rusty-chat-web"
+description = "Rusty-Chat Dioxus frontend (CSR, wasm32)"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+publish = false
+
+[dependencies]
+dioxus = { version = "0.7.10", features = ["web"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1

@@ -1,0 +1,15 @@
+[application]
+name = "rusty-chat-web"
+
+[web.app]
+title = "Rusty-Chat"
+
+[web.resource]
+style = []
+
+[web.resource.dev]
+
+[serve]
+address = "127.0.0.1"
+port = 8081
+open = false

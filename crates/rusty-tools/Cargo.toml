@@ -1,0 +1,10 @@
+[package]
+name = "rusty-tools"
+description = "Rusty-Chat tool SDK: #[derive(Tool)] generates MCP stdio servers from Rust structs (rmcp-based, JSON Schema auto-export)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[dependencies]
+rc-core = { workspace = true }

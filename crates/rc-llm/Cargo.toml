@@ -1,0 +1,10 @@
+[package]
+name = "rc-llm"
+description = "Rusty-Chat LLM integration: Ollama/OpenAI/Responses-API streaming state machines, payload conversion, OR-style output items, model registry"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[dependencies]
+rc-core = { workspace = true }

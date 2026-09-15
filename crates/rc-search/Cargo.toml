@@ -1,0 +1,10 @@
+[package]
+name = "rc-search"
+description = "Rusty-Chat web search: 30+ search engine adapters and SSRF-safe web loader (published as a standalone crate)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[dependencies]
+rc-core = { workspace = true }

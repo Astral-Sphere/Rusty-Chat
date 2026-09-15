@@ -1,0 +1,19 @@
+[package]
+name = "rusty-chat"
+description = "Rusty-Chat server binary: CLI (serve/migrate-check/reindex/create-admin), axum assembly, embedded frontend"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "rusty-chat"
+path = "src/main.rs"
+
+[dependencies]
+rc-core = { workspace = true }
+rc-db = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

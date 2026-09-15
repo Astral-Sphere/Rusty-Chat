@@ -1,0 +1,10 @@
+[package]
+name = "rc-auth"
+description = "Rusty-Chat authentication: JWT (HS256), bcrypt/argon2, sk- API keys, Fernet decryption of legacy rows"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[dependencies]
+rc-core = { workspace = true }

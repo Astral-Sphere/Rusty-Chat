@@ -1,0 +1,10 @@
+[package]
+name = "rc-tools"
+description = "Rusty-Chat tool system: MCP client manager (stdio servers), built-in tools, native tool-call loop, approval pauses, subagents"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[dependencies]
+rc-core = { workspace = true }

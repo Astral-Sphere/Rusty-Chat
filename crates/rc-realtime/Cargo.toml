@@ -1,0 +1,10 @@
+[package]
+name = "rc-realtime"
+description = "Rusty-Chat realtime: WebSocket hub with user:{id}/channel:{id} rooms, open-webui-compatible event semantics, browser-side RPC, SSE fallback"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[dependencies]
+rc-core = { workspace = true }

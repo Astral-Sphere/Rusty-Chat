@@ -1,0 +1,67 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/rc-core",
+    "crates/rc-db",
+    "crates/rc-auth",
+    "crates/rc-llm",
+    "crates/rc-rag",
+    "crates/rc-search",
+    "crates/rc-media",
+    "crates/rc-realtime",
+    "crates/rc-tools",
+    "crates/rusty-tools",
+    "crates/rusty-chat",
+]
+# `web/` is the Dioxus CSR frontend and builds for wasm32-unknown-unknown.
+# It is its own workspace so wasm-only dependency graphs never unify with
+# native ones. `open-webui/` and `zed/` are vendored reference trees.
+exclude = ["web", "open-webui", "zed"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+authors = ["Jimmy Yu <jimmy@hammerklavier.cn>"]
+# NOTE: license deliberately unset — decision pending (see docs/DECISIONS.md).
+
+[workspace.dependencies]
+# --- internal crates ---
+rc-core = { path = "crates/rc-core" }
+rc-db = { path = "crates/rc-db" }
+rc-auth = { path = "crates/rc-auth" }
+
+# --- async runtime & web ---
+tokio = { version = "1", features = ["full"] }
+axum = "0.8.9"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "fs", "compression-gzip"] }
+futures = "0.3"
+async-trait = "0.1"
+
+# --- database ---
+sea-orm = { version = "2.0.3", features = ["sqlx-sqlite", "sqlx-postgres", "runtime-tokio", "with-json", "with-time", "with-uuid"] }
+sqlx = { version = "0.9.0", default-features = false, features = ["sqlite", "postgres", "any", "runtime-tokio", "macros"] }
+
+# --- serialization ---
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# --- errors, logging, misc ---
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
+time = { version = "0.3", features = ["serde", "formatting", "parsing", "macros"] }
+base64 = "0.22"
+hex = "0.4"
+sha2 = "0.10"
+rand = "0.9"
+
+[profile.release]
+lto = "thin"
+strip = "debuginfo"
+
+[profile.dev.package.sqlx-macros]
+opt-level = 3
