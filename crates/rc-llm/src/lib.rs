@@ -7,6 +7,8 @@
 
 pub mod models;
 pub mod ollama;
+pub mod ollama_chat;
+pub mod openai_chat;
 pub mod registry;
 
 pub use models::ModelInfo;

@@ -15,6 +15,8 @@ pub struct AppState {
     pub placeholder_hash: Arc<String>,
     /// open-webui `WEBUI_AUTH` (M1: always true in effect).
     pub webui_auth: bool,
+    /// WebSocket session registry (rooms user:{id}).
+    pub hub: Arc<rc_realtime::Hub>,
 }
 
 /// Config keys fetched for every `/api/config` request, in the exact order

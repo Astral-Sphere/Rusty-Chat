@@ -14,12 +14,14 @@ path = "src/main.rs"
 rc-core = { workspace = true }
 rc-db = { workspace = true }
 tokio = { workspace = true }
+uuid = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-axum = "0.8.9"
+axum = { version = "0.8.9", features = ["ws"] }
 clap = { version = "4.6.7", features = ["derive"] }
 tower-http = { workspace = true, features = ["cors", "fs"] }
+futures = { workspace = true }
 rand = { workspace = true }
 serde = "1"
 serde_json = "1"
@@ -28,9 +30,14 @@ sea-orm.workspace = true
 sqlx.workspace = true
 rc-llm = { version = "0.1.0", path = "../rc-llm" }
 reqwest = { version = "0.13.5", features = ["json", "stream"] }
+rc-realtime = { version = "0.1.0", path = "../rc-realtime" }
 
 [dev-dependencies]
 http = "1.5.0"
 http-body-util = "0.1.5"
+reqwest = { version = "0.13.5", features = ["json"] }
+sea-orm.workspace = true
+sqlx.workspace = true
 tempfile = "3.27.0"
+tokio-tungstenite = "0.30.0"
 tower = { workspace = true, features = ["util"] }

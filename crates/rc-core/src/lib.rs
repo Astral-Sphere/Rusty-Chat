@@ -7,7 +7,9 @@
 //! See `docs/COMPATIBILITY.md` for the authoritative table-by-table
 //! timestamp conventions.
 
+pub mod chat;
 pub mod error;
+pub mod events;
 pub mod timestamp;
 
 pub use error::Error;

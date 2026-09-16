@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use crate::state::AppState;
 
 /// Reads backend connection settings from the config engine.
-async fn backend_config(app: &AppState) -> BackendConfig {
+pub(crate) async fn backend_config(app: &AppState) -> BackendConfig {
     let get = |key: &'static str| async move { app.config.get(key).await.ok().flatten() };
     let urls = |key: &'static str| async move {
         get(key)

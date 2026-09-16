@@ -8,11 +8,19 @@ authors.workspace = true
 
 [dependencies]
 futures.workspace = true
+openai-interface = { version = "0.11.0-rc1" }
 rc-core = { workspace = true }
 reqwest = { version = "0.13.5", features = ["json", "stream"] }
 serde.workspace = true
+tracing.workspace = true
+uuid = { workspace = true }
 serde_json.workspace = true
+bytes = "1.12.1"
 
 [dev-dependencies]
 axum = "0.8.9"
 tokio = { workspace = true, features = ["full"] }
+
+[features]
+default = ["deepseek"]
+deepseek = ["openai-interface/deepseek"]

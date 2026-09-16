@@ -53,6 +53,7 @@ async fn test_app() -> (axum::Router, AppState, tempfile::TempDir) {
         version: env!("CARGO_PKG_VERSION"),
         placeholder_hash: std::sync::Arc::new(rc_auth::placeholder_hash()),
         webui_auth: true,
+        hub: std::sync::Arc::new(rc_realtime::Hub::new()),
     };
     // dist path without index.html → API-only (no fallback service)
     let router = rusty_chat::build_router(state.clone(), dir.path());

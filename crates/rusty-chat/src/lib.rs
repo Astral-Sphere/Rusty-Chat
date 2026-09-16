@@ -60,6 +60,11 @@ pub fn build_router(app_state: AppState, frontend_dist: &std::path::Path) -> axu
             axum::routing::get(routes::models::get_models),
         )
         .route(
+            "/api/chat/completions",
+            axum::routing::post(routes::chat::chat_completion),
+        )
+        .route("/ws", axum::routing::get(routes::chat::ws_handler))
+        .route(
             "/ollama/{*path}",
             axum::routing::any(routes::models::ollama_proxy),
         )
@@ -111,6 +116,7 @@ pub async fn open_state() -> Result<(AppState, Settings)> {
         version: env!("CARGO_PKG_VERSION"),
         placeholder_hash: std::sync::Arc::new(rc_auth::placeholder_hash()),
         webui_auth: settings.webui_auth,
+        hub: std::sync::Arc::new(rc_realtime::Hub::new()),
     };
     Ok((app, settings))
 }

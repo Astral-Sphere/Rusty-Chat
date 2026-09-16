@@ -1,7 +1,7 @@
 # PROGRESS.md — 进度看板（每次交付后必须更新）
 
 > 接手/恢复上下文时**先读本文**，再读 DECISIONS / ARCHITECTURE（见 AGENTS.md §1）。
-> 最后更新：2026-09-16（M1 进行中：M1-1/2/3/4 已完成）
+> 最后更新：2026-09-16（M1 进行中：M1-5 已完成，剩 M1-6/7）
 
 ## 里程碑总览
 
@@ -40,16 +40,24 @@
 - [x] **M1-2**（d78ad77）：rc-auth — JWT HS256（claims id/exp/iat/jti、epoch 秒）、bcrypt cost12 + 72 字节语义（verify 截断/signup 拒绝）、argon2 前缀识别、sk- API key、parse_duration、placeholder-hash 防时序；**契约测试：PyJWT 签发的 token 可被解码、Python bcrypt hash 可被验证**（jsonwebtoken 11 需显式 crypto provider，选 rust_crypto）。
 - [x] **M1-3**（本次提交）：rusty-chat lib+bin 拆分（契约测试用 oneshot 驱动完整 router）；settings（WEBUI_SECRET_KEY 三级解析+落盘）；DEFAULT_CONFIG registry（/api/config 全部 48 键 + user.permissions 完整树）；GET /api/config（匿名公共子集/onboarding/登录后全量）；/api/v1/auths/{signin,signup,signout,update/password,api_key} + GET /（session）——响应形状与 OWU routers/auths.py 逐字段对齐（首用户 admin+enable_signup 自动关闭、TOCTOU 注释、placeholder 烧录、cookie token httponly samesite=lax）；2 个契约测试覆盖完整流程。
 - [x] **M1-4**（本次提交）：rc-llm — `ollama.rs`（多后端 /api/tags 扇出合并、urls 聚合、lowest_version）、`registry.rs`（OpenAI 兼容 /models 拉取 + bearer/prefix_id/urlIdx + 去重 last-wins）、`models.rs` DTO（serde flatten 保留未知字段，urlIdx rename）；rusty-chat `/api/models`（VerifiedUser + config 驱动）与 `/ollama/*` 流式反向代理；7 项单元测试含 mock 后端。**openai-interface 0.11.0-rc1 调研完成**（docs/OPENAI_INTERFACE.md）：MIT、无阻断、流式/工具/Responses/embeddings/audio/images 全覆盖；缺口清单（对称 derive、宽容 chunk 解析、de-gate reasoning_content、发 0.11.0 final）已整理待反馈作者。
-- [ ] **M1-5**：/api/chat/completions + WS events
+- [x] **M1-5**（本次提交）：rc-core 新增 chat.rs（ChatCompletionForm/ChatMessage/StreamDelta/OutputItem + OutputAccumulator）与 events.rs（WsFrame + 事件载荷构造器，形状对齐 Chat.svelte chatEventHandler）；rc-llm 新增 openai_chat.rs（openai-interface 0.11.0 适配：请求构建 typed 参数+extra_body 透传、SSE chunk→StreamDelta 含 reasoning_content（deepseek feature 透传）、tool_calls 分片聚合、非流式 complete）与 ollama_chat.rs（/api/chat ndjson：OpenAI→Ollama payload 转换（max_tokens→num_predict 等）、thinking→Reasoning、跨 TCP 分块行重组）；rc-realtime Hub（user:{id} 房间、多会话、离线降级）；rusty-chat /api/chat/completions（模型解析 404、用户消息+助手占位持久化、stream=false 同步 OpenAI JSON、stream=true 任务 envelope + tokio spawn）+ /ws（首帧 token 握手、heartbeat-ack、hub 注册）；2 个端到端契约测试（真实端口 + WS 客户端：事件序列 delta→done→active(false) + blob/chat_message 持久化断言）。
 - [ ] **M1-6**：web/ 登录 + 聊天 UI
 - [ ] **M1-7**：chats CRUD 端点
 
-## 下一步（M1-5 起点）
+## 下一步（M1-6 起点）
 
-1. rc-core：内部 OpenAI-shape 类型 + OR-style output items（message/reasoning/function_call/function_call_output）数据模型。
-2. rc-llm `openai_chat`：接 openai-interface（"0.11.0-rc1"），请求映射 + 流式 chunk → output items 流；Ollama ndjson 方言转换（payload OpenAI↔Ollama + 响应转回 OpenAI SSE 语义）。
-3. `POST /api/chat/completions` 端点 + WS `/ws`（auth 帧、user:{id} 房间、events 事件帧）+ task envelope。
-4. 之后 M1-6 web UI、M1-7 chats 端点。
+1. web/：dx 脚手架补全（router、stores：config/user/token localStorage、ws 单例）。
+2. 登录页（signin/signup，存 token）→ 聊天页（模型选择器 /api/models、消息列表、发送→WS events 渲染 delta、chat:active 转圈、完成态）。
+3. markdown 渲染：comrak（default-features=false + 数学扩展）+ katex-rs + 服务端 tree-sitter 高亮（流式纯文本、完成后回填）+ ammonia。
+4. M1-7 chats CRUD 端点（/api/v1/chats/* 列表/新建/更新/删除/搜索）+ 契约测试（repo 层已就绪，纯路由工作）。
+5. web/ 依赖版本以 cargo add 为准（dioxus 0.7.10 已核）；ws 客户端可用 tokio-tungstenite 的 wasm 替代（嵌 gluon/web-sys WebSocket 直接写）。
+
+## M1-5 踩坑
+
+- openai-interface：Message 枚举变体字段不齐（Assistant 无 function_call、有 prefix/reasoning_content，不可 ..Default::default()）；StreamOptions.include_usage 是 bool 非 Option；StopKeywords 仅 Serialize（stop 走 extra_body）；OapiError 在 errors:: 模块；流式 finish_reason 用 streaming::FinishReason（与 chat::FinishReason 不同类型，usage 计数为 usize）。
+- 依赖 feature 透传：deepseek 需在本 crate 声明同名 feature 并映射（#[cfg(feature=…)] 看本 crate）。
+- axum WS：Message::Text 需要 Utf8Bytes（.into()）；Parts/Bytes 顺序在 body extractor 之前。
+- ollama 模型解析依赖 /api/tags——mock 后端别忘了它（只剩 /api/chat 会 404 Model not found）。
 
 ## 阻塞/待办
 
