@@ -1,7 +1,7 @@
 # PROGRESS.md — 进度看板（每次交付后必须更新）
 
 > 接手/恢复上下文时**先读本文**，再读 DECISIONS / ARCHITECTURE（见 AGENTS.md §1）。
-> 最后更新：2026-09-16（M0 完成时）
+> 最后更新：2026-09-16（M1 进行中：M1-1/2/3 已完成）
 
 ## 里程碑总览
 
@@ -32,15 +32,24 @@
 
 ## 当前进行中
 
-（无——M0 收尾，等待开始 M1）
+**M1-4：rc-llm 模型注册**（Ollama/OpenAI 合并 + /api/models + openai-interface 0.11.0-rc1 接入调研）
 
-## 下一步（M1 起点）
+## M1 分段进度
 
-1. `rc-db`：生成全部 43 表 SeaORM 实体（先 user/auth/api_key/config/chat/chat_message/shared_chat/tag/folder 七个核心），时间戳列全部用 `Secs/Nanos` 包装；仓库层方法名对齐 open-webui models 层语义（如 `Chats::get_chat_by_id_and_user_id`）。
-2. `rc-auth`：JWT HS256 签发/校验（claims id/exp/iat/jti）、bcrypt/argon2、`sk-` API key、cookie `token`。
-3. `rusty-chat`：`serve` + `create-admin` + `migrate-check` 子命令，axum AppState（config engine + db pool），`/api/config` 与 `/api/v1/auths/*` 首批端点 + 契约测试。
-4. `web/`：dioxus-cli 脚手架、登录页、聊天骨架。
-5. `openai-interface` 接入调研：核对 SSE 流式解析/Responses API/工具调用覆盖面，缺口列清单反馈用户（联动 D-011）。
+- [x] **M1-1**（e02b612）：rc-db 9 实体 + 仓库层（users/auths/chats/chat_messages/tags/shared_chats/config 引擎）+ chat.chat blob 算法纯函数（merge/upsert/delete/repair，1:1 移植 chats.py）+ 22 项双方言集成测试。踩坑：argcon2 0.6 新 API（CustomizedPasswordHasher + 裸盐字节）、sea-query 1.0 的 ExprTrait/PgExpr trait 方法、json_each/json_array_elements_text 方言分支、functional unique index（lower(email)）下测试 email 必须唯一。
+- [x] **M1-2**（d78ad77）：rc-auth — JWT HS256（claims id/exp/iat/jti、epoch 秒）、bcrypt cost12 + 72 字节语义（verify 截断/signup 拒绝）、argon2 前缀识别、sk- API key、parse_duration、placeholder-hash 防时序；**契约测试：PyJWT 签发的 token 可被解码、Python bcrypt hash 可被验证**（jsonwebtoken 11 需显式 crypto provider，选 rust_crypto）。
+- [x] **M1-3**（本次提交）：rusty-chat lib+bin 拆分（契约测试用 oneshot 驱动完整 router）；settings（WEBUI_SECRET_KEY 三级解析+落盘）；DEFAULT_CONFIG registry（/api/config 全部 48 键 + user.permissions 完整树）；GET /api/config（匿名公共子集/onboarding/登录后全量）；/api/v1/auths/{signin,signup,signout,update/password,api_key} + GET /（session）——响应形状与 OWU routers/auths.py 逐字段对齐（首用户 admin+enable_signup 自动关闭、TOCTOU 注释、placeholder 烧录、cookie token httponly samesite=lax）；2 个契约测试覆盖完整流程。
+- [ ] **M1-4**：rc-llm 模型注册 + /api/models + openai-interface 接入
+- [ ] **M1-5**：/api/chat/completions + WS events
+- [ ] **M1-6**：web/ 登录 + 聊天 UI
+- [ ] **M1-7**：chats CRUD 端点
+
+## 下一步（M1-4 起点）
+
+1. 调研 openai-interface 0.11.0-rc1：chat.completions 流式/非流式、工具调用、Responses API、embeddings、audio/images 覆盖面；缺什么向用户提需求（D-011）。
+2. rc-llm：Ollama 客户端（按可发布标准）→ /ollama 代理 + 模型注册表合并（OWU `get_all_models` 语义：多后端扇出、去重、prefix_id、urlIdx）。
+3. `/api/models` + `/api/config` 联动（model 列表进入前端模型选择器）。
+4. 之后 M1-5 聊天管线（内部 OR-style output items 数据模型先行，参照 ARCHITECTURE.md §3）。
 
 ## 阻塞/待办
 
