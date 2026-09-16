@@ -5,12 +5,11 @@
 
 use crate::registry::now_epoch;
 use futures::{Stream, StreamExt};
+use openai_interface::OapiError;
 use openai_interface::chat::create::request::{
     Message as OaiMessage, MessageContent, RequestBody, StreamOptions,
 };
 use openai_interface::chat::create::response::streaming::ChatCompletionChunk;
-use openai_interface::chat::create::response::streaming::FinishReason as StreamFinishReason;
-use openai_interface::errors::OapiError;
 use openai_interface::rest::post::PostStream;
 use openai_interface::rest::{RequestOptions, default_client};
 use rc_core::chat::{ChatCompletionForm, ChatMessage, StreamDelta};
@@ -64,29 +63,28 @@ fn content_to_message_content(content: &Value) -> MessageContent {
 
 fn to_oai_message(msg: &ChatMessage) -> OaiMessage {
     match msg.role.as_str() {
-        "system" => OaiMessage::System {
+        "system" => OaiMessage::System(openai_interface::chat::create::request::SystemMessage {
             content: content_to_message_content(&msg.content),
             name: msg.name.clone(),
-        },
-        "assistant" => OaiMessage::Assistant {
-            content: Some(rc_core::chat::content_text(&msg.content)),
-            audio: None,
-            refusal: None,
-            // Tool-call replay arrives with the M6 tool loop.
-            tool_calls: None,
-            name: None,
-            prefix: false,
-            reasoning_content: msg.reasoning_content.clone(),
-        },
-        "tool" => OaiMessage::Tool {
+        }),
+        "assistant" => {
+            OaiMessage::Assistant(openai_interface::chat::create::request::AssistantMessage {
+                content: Some(rc_core::chat::content_text(&msg.content)),
+                // Tool-call replay arrives with the M6 tool loop.
+                tool_calls: None,
+                reasoning_content: msg.reasoning_content.clone(),
+                ..Default::default()
+            })
+        }
+        "tool" => OaiMessage::Tool(openai_interface::chat::create::request::ToolMessage {
             content: MessageContent::Text(rc_core::chat::content_text(&msg.content)),
             tool_call_id: msg.tool_call_id.clone().unwrap_or_default(),
-        },
+        }),
         // user + anything unknown → user
-        _ => OaiMessage::User {
+        _ => OaiMessage::User(openai_interface::chat::create::request::UserMessage {
             content: content_to_message_content(&msg.content),
             name: msg.name.clone(),
-        },
+        }),
     }
 }
 
@@ -171,18 +169,6 @@ fn axum_extra_name(name: &str) -> Result<reqwest::header::HeaderName> {
         .map_err(|e| Error::BadRequest(format!("invalid header name {name}: {e}")))
 }
 
-fn finish_reason_str(reason: &StreamFinishReason) -> &'static str {
-    match reason {
-        StreamFinishReason::Length => "length",
-        StreamFinishReason::Stop => "stop",
-        StreamFinishReason::ToolCalls => "tool_calls",
-        StreamFinishReason::FunctionCall => "function_call",
-        StreamFinishReason::ContentFilter => "content_filter",
-        #[cfg(feature = "deepseek")]
-        StreamFinishReason::InsufficientSystemResource => "insufficient_system_resource",
-    }
-}
-
 /// Adapter stream: openai-interface SSE chunks → unified deltas. A `Done`
 /// delta is synthesized at stream end from the last observed finish_reason.
 pub struct OpenAiDeltaStream {
@@ -205,7 +191,7 @@ impl Stream for OpenAiDeltaStream {
                     let mut deltas = Vec::new();
                     for choice in &chunk.choices {
                         if let Some(reason) = &choice.finish_reason {
-                            self.last_finish_reason = Some(finish_reason_str(reason).to_string());
+                            self.last_finish_reason = Some(reason.as_str().to_string());
                         }
                         let delta = &choice.delta;
                         if let Some(content) = &delta.content
@@ -215,7 +201,7 @@ impl Stream for OpenAiDeltaStream {
                                 content: content.clone(),
                             });
                         }
-                        #[cfg(feature = "deepseek")]
+                        // openai-interface 0.12: the field is unconditional under the `reasoning`
                         if let Some(reasoning) = &delta.reasoning_content
                             && !reasoning.is_empty()
                         {
@@ -226,7 +212,7 @@ impl Stream for OpenAiDeltaStream {
                         if let Some(tool_calls) = &delta.tool_calls {
                             for call in tool_calls {
                                 deltas.push(StreamDelta::ToolCall {
-                                    index: call.index,
+                                    index: call.index as usize,
                                     id: call.id.clone(),
                                     name: call.function.as_ref().and_then(|f| f.name.clone()),
                                     arguments_delta: call
@@ -240,9 +226,9 @@ impl Stream for OpenAiDeltaStream {
                     }
                     if let Some(usage) = &chunk.usage {
                         deltas.push(StreamDelta::Usage {
-                            prompt_tokens: usage.prompt_tokens as u64,
-                            completion_tokens: usage.completion_tokens as u64,
-                            total_tokens: Some(usage.total_tokens as u64),
+                            prompt_tokens: usage.prompt_tokens,
+                            completion_tokens: usage.completion_tokens,
+                            total_tokens: Some(usage.total_tokens),
                         });
                     }
                     if !deltas.is_empty() {
@@ -372,7 +358,8 @@ mod tests {
             r#"data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"reasoning_content":"thin"},"finish_reason":null}]}"#,
             r#"data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"c9","function":{"name":"f","arguments":"{\"x\""}}]},"finish_reason":null}]}"#,
             r#"data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":":1}"}}]},"finish_reason":"tool_calls"}]}"#,
-            r#"data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[],"usage":{"prompt_tokens":3,"completion_tokens":5,"total_tokens":8}}"#,
+            // vLLM-style usage-only chunk: `"choices": null` (0.12 tolerance fix)
+            r#"data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":null,"usage":{"prompt_tokens":3,"completion_tokens":5,"total_tokens":8}}"#,
             "data: [DONE]",
         ];
         let body = format!("{}\n\n", sse_lines.join("\n\n"));

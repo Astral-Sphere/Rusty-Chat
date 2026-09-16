@@ -1,8 +1,31 @@
-# OPENAI_INTERFACE.md — openai-interface 接入调研（2026-09-16）
+# OPENAI_INTERFACE.md — openai-interface 接入调研与适配记录
 
 > crate：`openai-interface`（用户自维护，Codeberg/Hammerklavier），**0.11.0-rc1 起 MIT**（此前 AGPL）。
-> 调研方式：克隆仓库源码逐模块核对（rc1 已发布 crates.io；git 已打 `v0.11.0` tag，等待 final 发布）。
-> 结论：**无接入硬阻断**，作为 rc-llm 的 OpenAI 兼容层（DECISIONS D-011）。
+> 当前使用：**v0.12.0**（2026-09-16 适配完成，84 测试全绿）。
+> 结论：无接入硬阻断，作为 rc-llm 的 OpenAI 兼容层（DECISIONS D-011）。
+
+## 0. v0.12.0 适配记录（2026-09-16）
+
+初版调研提出的 10 项问题在 0.12.0 中**基本全部解决**，逐项核对：
+
+| 提出的问题 | 0.12.0 状态 |
+|---|---|
+| choices 严格解析（vLLM null-choices usage chunk 失败） | ✅ `null_to_empty_vec` + `#[serde(default)]`（response.rs §streaming 顶部）——我们用 `"choices": null` 的 fixture 锁定该行为 |
+| FinishReason/ResponseRole 未知变体失败 | ✅ `wire_string_enum!` 宏生成 `Unknown` 兜底 + `as_str()` |
+| FinishReason 双类型（streaming vs chat） | ✅ 合一，streaming 模块 `pub use crate::chat::FinishReason` |
+| 响应缺 Serialize | ✅ Chunk/Completion/delta 全部 `Serialize + Deserialize + Clone` |
+| 请求缺 Deserialize | ✅ `RequestBody`、`Message` 枚举、消息结构体全部双向 |
+| reasoning_content 被 deepseek 门控 | ✅ 改为 `reasoning` feature（**默认开启**），`deepseek` 仅保留为别名 |
+| Message::Assistant 字段膨胀无 Default | ✅ 枚举重构为 `Message::System(SystemMessage)` 等结构体变体，全部 `Default`，另有 `Message::system/user/assistant/tool` 便捷构造器 |
+| StopKeywords 仅 Serialize | ✅ untagged + Deserialize，typed `body.stop` 恢复使用 |
+| usage 计数 usize | ✅ `prompt_tokens` 等 u64 |
+| OapiError 深藏 errors:: | ✅ 根导出 `pub use errors::{ApiError, OapiError}` |
+| 无 Client 薄封装 | ❌ 未加（可选项，不影响使用） |
+| 0.11.0 final 未发布 | ✅ 直接跳到 0.12.0 |
+
+适配改动（rc-llm）：依赖升 0.12.0；feature 透传改名 `deepseek`→`reasoning`；delta 循环去掉 cfg 门；Assistant/Tool 消息改结构体变体 + `..Default::default()`；finish_reason 用 `as_str()`（含 Unknown）；usage 去掉 as-cast；`stop` 回到 typed 字段。契约测试 fixture 换用 `"choices": null` 锁定宽容解析。
+
+0.12.0 遗留小项（低优先）：`StreamOptions.include_usage` 仍是非 Option bool；base_url 必须带 `/v1` 前缀仍需调用方自知。
 
 ## 1. 设计形态
 

@@ -8,7 +8,7 @@ authors.workspace = true
 
 [dependencies]
 futures.workspace = true
-openai-interface = { version = "0.11.0-rc1" }
+openai-interface = "0.12.0"
 rc-core = { workspace = true }
 reqwest = { version = "0.13.5", features = ["json", "stream"] }
 serde.workspace = true
@@ -22,5 +22,8 @@ axum = "0.8.9"
 tokio = { workspace = true, features = ["full"] }
 
 [features]
-default = ["deepseek"]
-deepseek = ["openai-interface/deepseek"]
+default = ["reasoning"]
+# `reasoning` mirrors openai-interface's gate for the de-facto-standard
+# reasoning_content field (default-on upstream; kept explicit here so a
+# default-features=false build still compiles).
+reasoning = ["openai-interface/reasoning"]
