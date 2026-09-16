@@ -13,3 +13,11 @@ style = []
 address = "127.0.0.1"
 port = 8081
 open = false
+
+# dx dev server proxies API + WS to the rusty-chat backend
+[[proxy]]
+backend = "http://127.0.0.1:8080"
+
+[[proxy]]
+backend = "ws://127.0.0.1:8080/ws"
+path = "/ws"

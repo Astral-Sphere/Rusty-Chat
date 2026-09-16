@@ -165,6 +165,9 @@ async fn chats_crud_contract() {
     assert_eq!(chat1["title"], json!("First Chat"));
     let chat1_id = chat1["id"].as_str().unwrap().to_string();
 
+    // updated_at has second precision — space the two chats so ordering is
+    // deterministic (updated_at desc, id asc tiebreak).
+    std::thread::sleep(std::time::Duration::from_millis(1100));
     let (status, chat2) = call(
         &mut router,
         req(
