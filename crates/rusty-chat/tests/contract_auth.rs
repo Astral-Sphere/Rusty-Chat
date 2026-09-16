@@ -449,3 +449,63 @@ async fn api_config_with_authenticated_user_shows_full_features() {
         "onboarding flag only for anonymous pre-first-user"
     );
 }
+
+#[tokio::test]
+async fn api_models_lists_ollama_backend() {
+    use serde_json::json;
+
+    // fake ollama backend
+    let app = axum::Router::new().route(
+        "/api/tags",
+        axum::routing::get(|| async {
+            axum::Json(json!({"models": [
+                {"name": "llama3:8b", "model": "llama3:8b", "digest": "d1", "size": 1},
+                {"name": "mistral", "model": "mistral", "digest": "d2"}
+            ]}))
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let (mut router, app_state, _dir) = test_app().await;
+    app_state
+        .config
+        .upsert("ollama.enable", &json!(true))
+        .await
+        .unwrap();
+    app_state
+        .config
+        .upsert("ollama.base_urls", &json!([format!("http://{addr}")]))
+        .await
+        .unwrap();
+
+    // anonymous → 401
+    let (status, _, _) = call(&mut router, get_request("/api/models", None)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // signup admin, list models
+    let (status, body, _) = call(
+        &mut router,
+        json_request(
+            "POST",
+            "/api/v1/auths/signup",
+            json!({
+                "name": "A", "email": "a@example.com", "password": "pw-models-1"
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let token = body["token"].as_str().unwrap();
+
+    let (status, body, _) = call(&mut router, get_request("/api/models", Some(token))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let data = body["data"].as_array().expect("data array");
+    assert_eq!(data.len(), 2);
+    assert_eq!(data[0]["owned_by"], json!("ollama"));
+    assert_eq!(data[0]["object"], json!("model"));
+    assert_eq!(data[0]["id"], json!("llama3:8b"));
+    // raw ollama tag payload preserved for the frontend
+    assert_eq!(data[0]["ollama"]["digest"], json!("d1"));
+}

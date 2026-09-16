@@ -169,7 +169,6 @@ pub fn default_config() -> BTreeMap<String, serde_json::Value> {
     m.insert("ui.watermark".into(), serde_json::json!(true));
 
     // --- feature toggles (M2+ subsystems; M1 ships them off like fresh OWU) ---
-    m.insert("direct.enable".into(), serde_json::json!(false));
     m.insert("folders.enable".into(), serde_json::json!(true));
     m.insert("folders.max_file_count".into(), serde_json::json!(null));
     m.insert("channels.enable".into(), serde_json::json!(false));
@@ -225,6 +224,15 @@ pub fn default_config() -> BTreeMap<String, serde_json::Value> {
         "file.image_compression_height".into(),
         serde_json::json!(null),
     );
+
+    // --- backends (M1-4) ---
+    m.insert("ollama.enable".into(), serde_json::json!(false));
+    m.insert("ollama.base_urls".into(), serde_json::json!([]));
+    m.insert("openai.enable".into(), serde_json::json!(false));
+    m.insert("openai.api_base_urls".into(), serde_json::json!([]));
+    m.insert("openai.api_keys".into(), serde_json::json!([]));
+    m.insert("openai.api_configs".into(), serde_json::json!([]));
+    m.insert("direct.enable".into(), serde_json::json!(false));
 
     // --- permissions ---
     m.insert("user.permissions".into(), default_user_permissions());

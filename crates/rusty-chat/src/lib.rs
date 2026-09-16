@@ -51,6 +51,18 @@ pub fn build_router(app_state: AppState, frontend_dist: &std::path::Path) -> axu
             "/api/v1/auths/api_key",
             axum::routing::delete(routes::auths::delete_api_key),
         )
+        .route(
+            "/api/models",
+            axum::routing::get(routes::models::get_models),
+        )
+        .route(
+            "/api/v1/models",
+            axum::routing::get(routes::models::get_models),
+        )
+        .route(
+            "/ollama/{*path}",
+            axum::routing::any(routes::models::ollama_proxy),
+        )
         .route("/health", axum::routing::get(|| async { "OK" }))
         .with_state(app_state);
 
