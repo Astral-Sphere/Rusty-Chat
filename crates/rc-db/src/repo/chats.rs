@@ -11,6 +11,7 @@ use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, Condition, DatabaseConnection, EntityTrait,
     QueryFilter, QueryOrder, QuerySelect,
 };
+use serde_json::{Value, json};
 
 pub use chat::Model as Chat;
 
@@ -914,4 +915,53 @@ pub async fn update_chat_last_read_at_by_id(
     am.last_read_at = Set(Some(ts));
     am.update(db).await?;
     Ok(Some((ts, was_unread)))
+}
+
+/// `Chats.get_pinned_chats_by_user_id` — title-id list of pinned chats.
+pub async fn get_pinned_chats_by_user_id(
+    db: &DatabaseConnection,
+    user_id: &str,
+) -> Result<Vec<ChatTitleId>> {
+    let rows: Vec<ChatListRow> = chat::Entity::find()
+        .filter(chat::Column::UserId.eq(user_id))
+        .filter(chat::Column::Pinned.eq(true))
+        .filter(not_internal(db.get_database_backend()))
+        .order_by_desc(chat::Column::UpdatedAt)
+        .select_only()
+        .columns([
+            chat::Column::Id,
+            chat::Column::Title,
+            chat::Column::UpdatedAt,
+            chat::Column::CreatedAt,
+            chat::Column::LastReadAt,
+        ])
+        .into_tuple()
+        .all(db)
+        .await?;
+    Ok(rows
+        .into_iter()
+        .map(
+            |(id, title, updated_at, created_at, last_read_at)| ChatTitleId {
+                id,
+                title: title.unwrap_or_else(|| "New Chat".to_string()),
+                updated_at: updated_at.unwrap_or(0),
+                created_at: created_at.unwrap_or(0),
+                last_read_at,
+            },
+        )
+        .collect())
+}
+
+/// `Chats.update_chat_variables_by_id`.
+pub async fn update_chat_variables_by_id(
+    db: &DatabaseConnection,
+    id: &str,
+    variables: Option<Value>,
+) -> Result<Option<Chat>> {
+    let Some(row) = chat::Entity::find_by_id(id).one(db).await? else {
+        return Ok(None);
+    };
+    let mut am: chat::ActiveModel = row.into();
+    am.variables = Set(Some(variables.unwrap_or_else(|| json!({}))));
+    Ok(Some(am.update(db).await?))
 }

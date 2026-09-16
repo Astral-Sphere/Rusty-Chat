@@ -3,7 +3,7 @@ use sea_orm::entity::prelude::*;
 /// `chat` table — the core conversation entity. The `chat` JSON blob holds
 /// the full message tree (`history.messages` map + `currentId`) and is kept
 /// in sync with the `chat_message` table (see `crate::history`).
-#[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, DeriveEntityModel)]
 #[sea_orm(table_name = "chat")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]

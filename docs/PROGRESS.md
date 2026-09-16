@@ -1,7 +1,7 @@
 # PROGRESS.md — 进度看板（每次交付后必须更新）
 
 > 接手/恢复上下文时**先读本文**，再读 DECISIONS / ARCHITECTURE（见 AGENTS.md §1）。
-> 最后更新：2026-09-16（M1 进行中：M1-5 已完成，剩 M1-6/7）
+> 最后更新：2026-09-16（M1 进行中：M1-1/2/3/4/5/7 完成，剩 M1-6 web UI）
 
 ## 里程碑总览
 
@@ -42,9 +42,9 @@
 - [x] **M1-4**（本次提交）：rc-llm — `ollama.rs`（多后端 /api/tags 扇出合并、urls 聚合、lowest_version）、`registry.rs`（OpenAI 兼容 /models 拉取 + bearer/prefix_id/urlIdx + 去重 last-wins）、`models.rs` DTO（serde flatten 保留未知字段，urlIdx rename）；rusty-chat `/api/models`（VerifiedUser + config 驱动）与 `/ollama/*` 流式反向代理；7 项单元测试含 mock 后端。**openai-interface 0.11.0-rc1 调研完成**（docs/OPENAI_INTERFACE.md）：MIT、无阻断、流式/工具/Responses/embeddings/audio/images 全覆盖；缺口清单（对称 derive、宽容 chunk 解析、de-gate reasoning_content、发 0.11.0 final）已整理待反馈作者。
 - [x] **M1-5**（本次提交）：rc-core 新增 chat.rs（ChatCompletionForm/ChatMessage/StreamDelta/OutputItem + OutputAccumulator）与 events.rs（WsFrame + 事件载荷构造器，形状对齐 Chat.svelte chatEventHandler）；rc-llm 新增 openai_chat.rs（openai-interface 0.11.0 适配：请求构建 typed 参数+extra_body 透传、SSE chunk→StreamDelta 含 reasoning_content（deepseek feature 透传）、tool_calls 分片聚合、非流式 complete）与 ollama_chat.rs（/api/chat ndjson：OpenAI→Ollama payload 转换（max_tokens→num_predict 等）、thinking→Reasoning、跨 TCP 分块行重组）；rc-realtime Hub（user:{id} 房间、多会话、离线降级）；rusty-chat /api/chat/completions（模型解析 404、用户消息+助手占位持久化、stream=false 同步 OpenAI JSON、stream=true 任务 envelope + tokio spawn）+ /ws（首帧 token 握手、heartbeat-ack、hub 注册）；2 个端到端契约测试（真实端口 + WS 客户端：事件序列 delta→done→active(false) + blob/chat_message 持久化断言）。
 - [ ] **M1-6**：web/ 登录 + 聊天 UI
-- [ ] **M1-7**：chats CRUD 端点
+- [x] **M1-7**（本次提交）：/api/v1/chats 全套路由 — new/list(+list 别名, page 分页 60/页)/search/pinned/archived/archive_all/unarchive_all/shared/share/{share_id}(公开)/{id}(GET|POST|DELETE)/{id}/pin/{id}/archive/{id}/share(GET/DELETE)/{id}/tags(GET/POST)+DELETE /api/v1/chats；ChatResponse=实体直接序列化（serde 加到 chat entity），title 行带 active:false；所有权校验（非属主 401）；1 个大契约测试覆盖 CRUD+pin/archive+share+tags+搜索+越权。
 
-## 下一步（M1-6 起点）
+## 下一步（M1-6 起点，M1 最后一段）
 
 1. web/：dx 脚手架补全（router、stores：config/user/token localStorage、ws 单例）。
 2. 登录页（signin/signup，存 token）→ 聊天页（模型选择器 /api/models、消息列表、发送→WS events 渲染 delta、chat:active 转圈、完成态）。
