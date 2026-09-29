@@ -40,7 +40,7 @@ futures = "0.3"
 async-trait = "0.1"
 
 # --- database ---
-sea-orm = { version = "2.0.3", features = ["sqlx-sqlite", "sqlx-postgres", "runtime-tokio", "with-json", "with-time", "with-uuid"] }
+sea-orm = { version = "2.0.4", features = ["sqlx-sqlite", "sqlx-postgres", "runtime-tokio", "with-json", "with-time", "with-uuid"] }
 sqlx = { version = "0.9.0", default-features = false, features = ["sqlite", "postgres", "any", "runtime-tokio", "macros"] }
 
 # --- serialization ---

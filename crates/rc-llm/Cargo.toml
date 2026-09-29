@@ -8,7 +8,7 @@ authors.workspace = true
 
 [dependencies]
 futures.workspace = true
-openai-interface = "0.12.0"
+openai-interface = "0.14.0"
 rc-core = { workspace = true }
 reqwest = { version = "0.13.5", features = ["json", "stream"] }
 serde.workspace = true
