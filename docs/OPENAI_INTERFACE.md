@@ -1,7 +1,7 @@
 # OPENAI_INTERFACE.md — openai-interface 接入调研与适配记录
 
 > crate：`openai-interface`（用户自维护，Codeberg/Hammerklavier），**0.11.0-rc1 起 MIT**（此前 AGPL）。
-> 当前使用：**v0.12.0**（2026-09-16 适配完成，84 测试全绿）。
+> 当前使用：**v0.14.0**（2026-09-30 升级，零代码改动，全部测试通过）。
 > 结论：无接入硬阻断，作为 rc-llm 的 OpenAI 兼容层（DECISIONS D-011）。
 
 ## 0. v0.12.0 适配记录（2026-09-16）
@@ -26,6 +26,12 @@
 适配改动（rc-llm）：依赖升 0.12.0；feature 透传改名 `deepseek`→`reasoning`；delta 循环去掉 cfg 门；Assistant/Tool 消息改结构体变体 + `..Default::default()`；finish_reason 用 `as_str()`（含 Unknown）；usage 去掉 as-cast；`stop` 回到 typed 字段。契约测试 fixture 换用 `"choices": null` 锁定宽容解析。
 
 0.12.0 遗留小项（低优先）：`StreamOptions.include_usage` 仍是非 Option bool；base_url 必须带 `/v1` 前缀仍需调用方自知。
+
+## 0.1 v0.13.0 / v0.14.0 摘要（2026-09-30 核对）
+
+- **0.13.0**：新增 `vllm` feature（vLLM 专属采样/聊天参数，`RequestBody::vllm_sampling`/`vllm_chat` flatten 到顶层）。
+- **0.14.0**：`DeepSeekThinking`→`Thinking` 改名（门控放宽为 `any(deepseek, zai)`）；新增 `zai` feature（智谱 GLM 专属类型：`do_sample`/`tool_stream`/平台参数/检索与联网工具/`request_id`）；GLM 的非标准 finish_reason 由 `Unknown` 兜底。
+- 我们未使用以上专属字段，升级仅改版本号（提交 70351f5）；后续 M5/M6 需要按 provider 发差异化参数时可直接用 `vllm_*`/`zai_*` typed 字段替代 extra_body 透传。
 
 ## 1. 设计形态
 
