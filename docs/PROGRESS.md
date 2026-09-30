@@ -1,12 +1,12 @@
 # PROGRESS.md — 进度看板（每次交付后必须更新）
 
 > 接手/恢复上下文时**先读本文**，再读 DECISIONS / ARCHITECTURE（见 AGENTS.md §1）。
-> 最后更新：2026-09-30（M1 七段完成；openai-interface 0.14.0 / sea-orm 2.0.4 升级核验；M1 收官计划定稿，见「下一步」）
+> 最后更新：2026-09-30（**M1 全部完成**：7 段 + 收官增强 T1/T2/T3/T4/T1b/T5；下一步 M2 RAG）
 
 ## 里程碑总览
 
 - [x] **M0 脚手架**（2026-09-16 完成）
-- [ ] **M1 核心聊天**：rc-db 全实体 + auth/users/roles/config + chats CRUD（树状 history/分支/归档/置顶/分享/标签）+ Ollama/OpenAI 模型注册（接入 openai-interface）+ 统一 chat/completions + WS 流式 + Dioxus 聊天 UI（markdown+KaTeX+高亮）
+- [x] **M1 核心聊天**（2026-09-30 完成）：rc-db 全实体 + auth/users/roles/config + chats CRUD（树状 history/分支/归档/置顶/分享/标签）+ Ollama/OpenAI 模型注册（openai-interface 0.14.0）+ 统一 chat/completions + WS 流式 + Dioxus 聊天 UI（markdown+KaTeX+高亮+mermaid+分支）+ 标题生成任务 + Tailwind v4 + 单二进制内嵌
 - [ ] **M2 RAG**：文件上传（本地+object_store）+ 知识库 + chunking + embedding 引擎 + 三向量后端 + hybrid/rerank + 重索引 CLI
 - [ ] **M3 工作台与管理**：prompts（版本史）、模型预设、memories、groups/权限、folders/share、管理后台、反馈/评估
 - [ ] **M4 Channels + Automations + Calendar**
@@ -32,7 +32,25 @@
 
 ## 当前进行中
 
-（无进行中任务）依赖升级核验完成：openai-interface 0.14.0（0.13/0.14 仅新增 vllm/zai 专属类型，我们零代码改动，提交 70351f5）+ sea-orm 2.0.4，`cargo test --workspace` 全绿。下一步为 M1 收官增强。
+（无进行中任务）**M1 已于 2026-09-30 全部完成并验收**（提交 adf196d→b1c6104）。下一步进入 **M2 RAG**。
+
+## M1 收官增强（2026-09-30 完成）
+
+- [x] **T1a Tailwind v4**（adf196d）：standalone CLI（Rust 二进制，无 Node/npm，v4.3.3）；`web/input.css` → `just web-css` 生成 gitignored 的 `assets/tailwind.css`；dx 不会自动跑 Tailwind（官方指南即手动进程），just 配方为唯一入口。markdown 排版样式手写 `.markdown-body` prose 块（不依赖 JS 版 typography 插件）。
+- [x] **T1 渲染管线**（3f664e0）：`web/src/render.rs` 纯函数 — comrak 0.55（default-features=false 才能上 wasm；GFM/数学全是运行时 Options 非 cargo feature，修正 D-006）+ hardbreaks → `$..$`/`$$..$$` 经 katex-rs 0.3（wasm feature，跟踪上游 0.18.5）→ ammonia 4.2 单一消毒点（含注入的 KaTeX HTML/MathML/SVG 白名单）；流式纯文本、done 后 keyed 组件 memo 渲染；KaTeX css+fonts vendored 且字体 data URI 内联（dx/manganis 不处理 CSS 内 url()，`web/tools/gen_katex_inline.py` 再生成）。19 host 测试含 XSS 电池。
+- [x] **T2 标题生成**（0b0b845）：`rc-core::tasks` 1:1 移植 utils/task.py + middleware.py（prompt/messages 模板族、码点级截断、extract_title 回退链，27 测试）；`POST /api/v1/tasks/title/completions`（200 门/400/404/task model 解析/OpenAI JSON 透传）；首轮完成后台生成 + `chat:title` 广播 + 侧栏刷新；defaults 增 task.model.*/task.title.*（env 派生）。契约测试 3 个。
+- [x] **T3 代码高亮**（c6d0948）：新 crate `rc-highlight` — tree-sitter 0.27 + 14 grammar crates（跨版本经 `tree-sitter-language::LanguageFn` 统一）+ zed highlights.scm vendored 数据资产（12 语言，NOTICE 记录补丁；html 用 grammar crate 自带查询；markdown 因 zed fork 节点不兼容弃用）；predicate 由 runtime TextProvider 评估；@none 抹除；字节偏移 slice-back 验证。`POST /api/v1/utils/highlight` + `/languages`；前端 span→HTML 回填（overlap-skip、转义、data-hl 幂等）。19+5+1 测试。
+- [x] **T4 消息树分支**（e112c76）：`web/src/branches.rs` 纯函数（active_path 环防护、siblings_of、sibling_position、messages_for_regeneration，host 测试）；编辑用户消息 → 同 parentId 新分支重发；‹ n/m › 切换 = 部分更新 currentId；契约测试锁后端树语义。
+- [x] **T1b Mermaid**（9a83e77）：sebastian 0.8.0 直接可上 wasm（无需 -wasm 包装 crate）；```mermaid fence 渲染 SVG（每渲染唯一 id）；失败保留源码 + 错误提示；浅色卡片样式。
+- [x] **T5 验收**（b1c6104）：`just web-release` — dx build --release → web/dist → rust-embed（feature `embed-frontend`）单二进制，SPA fallback，api/ollama/ws 前缀不回退。**真实浏览器全链路冒烟通过**：注册→聊天→流式 markdown+KaTeX+高亮 rust fence+mermaid SVG→侧栏标题 Greetings→编辑重生成分支→‹ › 切换标题存活。冒烟揪出并修复 5 个 bug（见 M1-T5 踩坑）。
+
+### M1-T5 踩坑（冒烟发现的真 bug，均有回归测试）
+1. serve 全新 SQLite 目录崩（默认 URL 缺 `?mode=rwc`）——M0 已知坑在 settings.rs 复发。
+2. 标题触发判定用「chat_id 缺失」——前端总是发客户端生成 chat_id，永不触发；改为「本次请求是否新建了聊天」。
+3. `update_chat_title_by_id` 只写列不写 blob（M1-1 移植遗漏 OWU 的 `chat={**chat,'title'}`）——任何部分 blob 更新会从旧 blob title 重新派生列，把生成标题打回 "New Chat"。同步写列+blob 修复。
+4. 侧栏选中从未传导到 chat_view（M1-6 留在隐藏 div 里）——共享 Signal 接线，send() 同步维护两信号。
+5. 分支切换 currentId 落在兄弟消息本身导致回复不可见——补 `leaf_descendant`（open-webui Messages.svelte 的 youngest-child 链语义）。
+- 环境注意：podman 在本会话沙箱内无法启动（newuidmap setuid 缺失）——PG 契约测试需用户在终端跑 `just test-pg`；另 `just` 本机未装，直接用底层命令。
 
 ## M1 状态总结（2026-09-16）
 
@@ -48,28 +66,13 @@
 - [x] **M1-6**（本次提交，骨架完成）：Dioxus 0.7.10 CSR 应用 — api.rs（gloo-net HTTP + web-sys WebSocket 通道 + localStorage token + uuid）、登录视图（signin/signup 切换、错误显示）、聊天列表侧栏（/api/v1/chats/ 分页列表、置顶/active 标记、signout）、聊天视图（/api/models 模型选择、消息流式渲染（WS delta 追加→message_done 终态）、Enter 发送、chat:active 生成中状态、完成后按服务端持久化状态重载）；静态 CSS（asset! 加载，M2 换 Tailwind v4 管线）；dx 代理配置（/api + /ws → 8080）。wasm32 编译零警告。**M1-6 剩余**：markdown 渲染管线（comrak+katex-rs+服务端 tree-sitter 高亮）、标题生成展示、多分支消息树、占位符差异对拍。
 - [x] **M1-7**（本次提交）：/api/v1/chats 全套路由 — new/list(+list 别名, page 分页 60/页)/search/pinned/archived/archive_all/unarchive_all/shared/share/{share_id}(公开)/{id}(GET|POST|DELETE)/{id}/pin/{id}/archive/{id}/share(GET/DELETE)/{id}/tags(GET/POST)+DELETE /api/v1/chats；ChatResponse=实体直接序列化（serde 加到 chat entity），title 行带 active:false；所有权校验（非属主 401）；1 个大契约测试覆盖 CRUD+pin/archive+share+tags+搜索+越权。
 
-## 下一步（M1 收官计划，2026-09-30 定稿）
-
-执行顺序 **T1 → T2 → T3 → T4 → T1b → T5**；每项动手前先按 AGENTS.md §3 列全测试面。完成后 M1 验收打勾，进入 M2。
-
-- **T1 markdown 渲染管线**（前端 wasm）：web/ 新增 `render.rs` 纯函数模块 — comrak（default-features=false，GFM+math-dollars）→ `$..$`/`$$..$$` 经 katex-rs（wasm feature）渲染 → ammonia 消毒 → `dangerously_set_inner_html`；KaTeX css/woff2 静态资源由 rusty-chat 提供；流式期间纯文本、message_done 后整段渲染。测试面（host 端可测，web 是纯函数）：GFM 全要素、数学（inline/display/不完整公式/`$` 转义/代码块内不渲染）、XSS 白名单（script/iframe/javascript:/onerror）、空串/emoji/超长/CRLF。
-- **T2 标题生成任务端点**（后端+前端）：`POST /api/v1/tasks/title/completions`（形状对齐 routers/tasks.py）+ 聊天首轮后自动触发 + hub 广播 `chat:title`（rc-core events 已有构造器）→ 侧栏实时更新；task model 解析（config `task.model`，fallback 当前模型）；打样 /api/v1/tasks/ 路由组（M5 的 tags/queries/follow_up/moa 同构复用）。契约测试：端点形状、task model 缺失、标题落库（blob+列）、WS 载荷形状、prompt 模板变量。
-- **T3 服务端代码高亮**：新 crate `rc-highlight` — tree-sitter + 常用语言 grammar crates（rust/python/js/ts/go/c/cpp/json/yaml/bash/html/css/sql/markdown 起步），zed 的 `highlights.scm` 以**数据资产**形式 vendored 到 `assets/highlights/`（保留上游许可头，进不了 src 源码树，D-007 与 AGENTS.md §4 的调和方式，**待用户确认**）；`POST /api/v1/utils/highlight`（code+language → span 数组 `{start,end,class}`，未知语言返回 `unsupported:true` 原样透出）；前端完成态回填。测试面：每语言 smoke、未知/空/超长/无换行/深嵌套、非 ASCII 注释、CRLF/tab。
-- **T4 消息树分支 UI**：编辑历史消息生成新分支 + `‹ ›` 分支切换（后端 M1-1 的 blob 分支算法已就绪，纯前端为主 + 分支索引纯函数测试 + 契约测试补充编辑分支断言）。
-- **T1b Mermaid**：sebastian-wasm 渲染 ```mermaid 代码块为 SVG（D-005；独立任务因 wasm-bindgen 集成有自己的坑）。
-- **T5 M1 验收对拍**：`dx build --release` → rust-embed 内嵌 → 单二进制 serve 冒烟（登录→聊天→流式→标题→高亮全链路）；cargo test + clippy + fmt + PG 契约全绿；docs 同步。
-
-### 待用户拍板（不阻塞 T1/T2）
-1. T3 的 highlights.scm vendored 方式（推荐 `assets/highlights/` + 许可头 + DECISIONS 记录）。
-2. Tailwind v4 构建管线推迟到 M2（推荐，避免阻塞 M1 收官）。
-3. Mermaid 放 T1b（推荐）还是与 T1 合并。
-
-## 再下一步（M2 RAG 骨架概要）
+## 下一步（M2 RAG）
 
 - **M2-1** 文件上传与存储：/api/v1/files/（POST 上传/GET 元数据/GET file/content），本地 `DATA_DIR/uploads` + object_store trait 抽象。
 - **M2-2** 抽取与切分：rc-rag — PDF/DOCX/PPTX/XLSX/CSV/HTML/text 抽取；RAGTextSplitter 等切分策略对齐原版。
 - **M2-3** embedding 引擎 + 三向量后端：fastembed（默认本地）/ollama/openai；sqlite-vec（默认）/pgvector/qdrant，向量库 trait + 重索引 CLI。
 - **M2-4** 知识库 API（/api/v1/knowledge/）+ 聊天 RAG 注入（rag_template、`<source>` 包裹）+ hybrid BM25+rerank。
+- 顺带（M2 设计系统）：web/ 类名已全面 Tailwind 化，M2 引入主题变量（CSS-first `@theme`）即可，无迁移负担。
 
 ## M1-5 踩坑
 

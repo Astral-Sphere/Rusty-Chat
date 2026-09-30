@@ -220,6 +220,20 @@ RPC（`sio.call`）：`execute:python`（pyodide）、`execute:tool`（浏览器
 
 **本项目映射**：单一 WS 连接（`/ws`）+ 房间语义不变；聊天增量走 WS `events`；SSE 仅作为只读兜底；RPC 用带 `reply_to` 的请求帧。事件名保持与原版一致以便前端语义与测试对拍。
 
+## 6.1 已实现端点的契约事实（M1 落地，2026-09-30）
+
+- **POST /api/v1/tasks/title/completions**（对齐 routers/tasks.py generate_title 0.11.3）：
+  - 请求体是 plain dict `{model, messages, chat_id?}`（无 pydantic 模型）。
+  - `task.title.enable=false` → **200** + `{"detail": "Title generation is disabled"}`（200 门，非 4xx）。
+  - model 空 → 400 + 原文 detail「No model specified…」；model 不存在 → 404 `{"detail": "Model not found"}`。
+  - task model 解析（get_task_model_id）：请求模型 `connection_type==local`（本项目以 `owned_by=="ollama"` 等价）→ 用 `task.model.default`；否则 `task.model.external`；配置的模型不存在则恒 fallback 请求模型。
+  - 响应：OpenAI completion JSON **透传**（`choices[0].message.content`），前端自行解析（切首 `{` 到末 `}` → JSON 取 `title`）。
+  - prompt：`task.title.prompt_template`（空串→内置默认模板，逐字见 `rc_core::tasks::DEFAULT_TITLE_GENERATION_PROMPT_TEMPLATE`）；`{{prompt}}`/`{{MESSAGES:END:2}}` 族语义见 `rc_core::tasks`（含测试）。
+- **后台标题生成**（middleware.py 语义）：仅「本次请求**新建**了聊天」触发（不看 chat_id 是否缺失——前端总是发客户端生成的 chat_id）；完成后 `update_chat_title_by_id`（**列+blob.title 同步**，见陷阱 10）→ WS `chat:title`，`data` 是**标题字符串本身**（非对象）。
+- **chat blob 树操作**：`upsert_message_to_history` 新消息总是把 `currentId` 移到新消息；`update_chat_by_id` 顶层浅合并 + history 深合并，title 列从合并后 blob 的 `title` 派生（缺→"New Chat"）——因此**任何只写列的标题更新都会被后续 blob 更新覆盖**，必须列+blob 同写（OWU `update_chat_title_by_id` 即如此）。
+- **分支切换**（前端）：open-webui Messages.svelte 语义——兄弟切换后沿 youngest-child 链落到叶子再设 `currentId`（`web/src/branches.rs::leaf_descendant`）。
+- **后端 env 派生**：`OLLAMA_BASE_URLS`/`OPENAI_API_BASE_URLS`/`OPENAI_API_KEYS` 为 `;` 分隔列表；`ENABLE_OLLAMA_API`/`ENABLE_OPENAI_API` 默认 true；`ENABLE_TITLE_GENERATION` 默认 true；`TASK_MODEL`/`TASK_MODEL_EXTERNAL` 默认空。
+
 ## 7. REST API 面（≈250 端点，兼容目标）
 
 挂载（原版 main.py）：`/api/chat/completions`（管线入口，JSON task envelope + WS 增量）、`/api/chat/completed`、`/api/chat/actions/{id}`、`/api/config`、`/api/models[?base=]`、`/api/v1/{auths,users,chats,folders,channels,notes,knowledge,models,prompts,tools,functions,skills,memories,groups,files,tasks,configs,audio,images,retrieval,evaluations,analytics,utils,terminals,automations,calendars,notifications,pipelines}`、`/ollama/*`（代理）、`/openai/*`（代理）、`/health`。
@@ -245,3 +259,6 @@ RPC（`sio.call`）：`execute:python`（pyodide）、`execute:tool`（浏览器
 8. blob 与 chat_message 双写一致性。
 9. email 唯一性 = lower(email) 函数索引；SQLite 侧原版注册自定义 like() 函数（我们兜底 `lower() LIKE`）。
 10. 首用户 admin 的原子性（insert 后 `get_num_users()==1` 检查 + 置 enable_signup=false）。
+11. **标题列与 blob 双表示**：`title` 列是 blob.title 的派生缓存（update_chat_by_id 每次重派生）；生成标题必须列+blob 同写，否则被下一次部分更新打回（M1-T5 实测踩坑，见 §6.1）。
+12. **后台标题触发判定**是「本次请求新建了聊天」（chat blob 首次创建），不是「请求缺 chat_id」——前端总是带客户端生成的 chat_id。
+13. SQLite 默认 URL 不建文件：serve 的默认 `DATABASE_URL` 必须带 `?mode=rwc`（M0 坑在 settings 复发过一次）。

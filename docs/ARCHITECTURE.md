@@ -67,15 +67,16 @@
 
 ## 5. 前端（web/，Dioxus 0.7 CSR）
 
-- 独立 workspace（wasm32-unknown-unknown），构建产物 `web/dist`，由 rusty-chat rust-embed 内嵌于 `/`。
+- 独立 workspace（wasm32-unknown-unknown），构建产物 `web/dist`（`just web-build`：dx build --release + 拷贝）。rusty-chat 以 feature `embed-frontend`（rust-embed）把 web/dist 内嵌为单二进制（`just web-release`，SPA index 回退、api/ollama/ws 前缀不回退）；dev/测试默认走 `FRONTEND_DIST_DIR`（ServeDir）。注意 fresh clone 先跑 `just web-css` 生成 gitignored 的 tailwind.css。
 - 路由对齐原版页面：`/auth`、`/`（聊天）、`/c/[id]`、`/s/[id]`（分享）、`/workspace/{models,knowledge,prompts,tools,skills}`、`/admin/{users,settings,evaluations,functions}`、`/channels/[id]`、`/automations`、`/calendar`、`/playground/*`。
 - 状态：Dioxus Signals（config/user/models/settings/chats/…），WS 单例。
-- 渲染栈（全 Rust/WASM，见 DECISIONS D-004/D-005/D-006/D-007）：
-  - comrak（GFM+数学扩展）→ HTML → ammonia 消毒 → `dangerously_set_inner_html`；
-  - katex-rs 渲染 `$…$`/`$$…$$`（页面加载 katex.css/woff2 静态资源）；
-  - 代码高亮：**服务端** tree-sitter（复用 zed 的 highlights.scm）产出 span，流式期间纯文本、完成后回填；浏览器端备用 syntect(default-fancy)；
-  - Mermaid：sebastian（纯 Rust，sebastian-wasm）渲染 SVG；
-  - Artifacts：iframe 沙箱（sandbox 属性 + CSP）。
+- 渲染栈（全 Rust/WASM，已落地，见 DECISIONS D-004/D-005/D-006/D-007/D-013/D-014）：
+  - 样式：Tailwind v4 standalone CLI（无 Node/JS）从 `web/input.css` 生成 `assets/tailwind.css`（`just web-css`；markdown 排版为手写 `.markdown-body` 块）；
+  - markdown：comrak（GFM+hardbreaks+math_dollars 运行时选项）→ `$..$`/`$$..$$` 经 katex-rs（KaTeX 0.18.5 兼容输出，css+字体 data URI 内嵌）→ ammonia 单点消毒 → `dangerous_inner_html`；流式期间纯文本，done 后 keyed memo 渲染（`web/src/render.rs`）；
+  - 代码高亮：**服务端** `rc-highlight`（tree-sitter + vendored zed highlights.scm，12 语言）经 `POST /api/v1/utils/highlight` 出字节偏移 span，前端 `web/src/highlight.rs` 回填 `hl-*` span（`web/src/mermaid.rs` 先行处理 mermaid）；
+  - Mermaid：sebastian（纯 Rust，直接 wasm 目标可用）把 ```mermaid fence 渲染成 SVG，失败保留源码 + 错误提示；
+  - 消息树：`web/src/branches.rs` 纯函数（active_path/siblings/leaf_descendant），编辑重发生成 sibling 分支，‹ › 切换经部分 currentId 更新；
+  - Artifacts：iframe 沙箱（sandbox 属性 + CSP）。（M3+）
 - JS interop 仅限：pyodide（M6 代码解释器）、浏览器语音 API（MediaRecorder/Web Speech）。
 
 ## 6. 配置系统

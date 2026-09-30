@@ -31,7 +31,8 @@
 
 ## D-006 Markdown 用 comrak（default-features=false，wasm 官方支持）
 - 上游有 wasm32 cfg 段；GFM 表格/任务列表/脚注/删除线 + `$…$` 数学扩展。citation/mention/colon-fence 用预处理 pass 实现。消毒 ammonia。
-- 日期：2026-09-15
+- **2026-09-30 落地修正**：comrak 0.55 的 GFM/数学扩展全部是**运行时 Options**（`Options::extension` 字段），不是 cargo feature；default feature 含 syntect-onig（C 依赖，wasm 编译不过），wasm 侧必须 `default-features=false`。聊天语义开 `render.hardbreaks`（单换行即换行）。另：dx/manganis 不处理 CSS 内 `url()`，KaTeX 字体以 data URI 内联（`web/tools/gen_katex_inline.py`）。
+- 日期：2026-09-15；2026-09-30 修正
 
 ## D-007 代码高亮用服务端原生 tree-sitter
 - **决策**：后端 tree-sitter + highlights.scm（复用 zed `crates/grammars/src/*/highlights.scm` 查询文件 + crates.io tree-sitter crate，**不引入** zed 的 gpui/语言 crate）产出彩色 span 回填前端；流式期间纯文本。浏览器端备用 syntect(default-fancy)。
@@ -60,3 +61,15 @@
 ## D-012 上下文压缩恢复协议
 - 对话上下文会多次压缩；每次压缩后必须先读 `docs/PROGRESS.md` → `DECISIONS.md` → `ARCHITECTURE.md`（涉兼容再读 `COMPATIBILITY.md`）→ `git log/status` 对账 → 相关代码，再继续。写入 AGENTS.md §1。
 - 日期：2026-09-15（用户要求）
+
+## D-013 zed highlights.scm 以 vendored 数据资产引入（T3）
+- **决策**：zed 的 `highlights.scm` 查询文件是**数据**非源码，复制到 `crates/rc-highlight/assets/highlights/<lang>.scm`（附 NOTICE：来源、zed 许可 Apache-2.0、本地补丁说明），rust-embed/include_str! 编译期内嵌。与 AGENTS.md §4「不复制代码进源码」的调和：不进 `src/` 源码树、保留许可归属、变动可追溯。已在 M1-6 收官时经用户拍板。
+- **落地记录**：12 语言可用（bash/c/cpp/css/diff/go/javascript/json/python/rust/tsx/typescript）。两处 fork 漂移补丁（cpp 去掉 C++20 module 模式、javascript 去掉 TS 混合节点）用 node-types.json 驱动的脚本化剔除；markdown 弃用（zed 查询依赖 fork 专属节点 `pipe_table` 等，与 crates.io tree-sitter-markdown 0.7.1 不兼容）；html 用 grammar crate 自带查询。
+- **被否**：自写查询（22 语言工作量不可行且质量打折）；跳过 T3。
+- 日期：2026-09-30
+
+## D-014 Tailwind v4 standalone CLI（全程无 JS/无 Node）
+- **决策**：CSS 构建用 Tailwind v4 standalone CLI（Rust 二进制，无 Node/npm/JS 运行时），`web/input.css`（CSS-first 配置 + `@source` 扫描 rsx 类名）→ `just web-css` 生成 gitignored 的 `web/assets/tailwind.css`。dx 0.7 **不会**自动运行 Tailwind（官方指南即手动并行进程），just 配方是唯一入口；`web-release` 依赖 `web-css`。markdown 排版手写 `.markdown-body` prose 块，不引入 JS 版 typography 插件。
+- **依据**：产物是纯静态 CSS，浏览器零 JS 运行时；构建器本身是 Rust（Oxide），契合全 Rust 技术栈。原「推迟到 M2」在确认无 Node 依赖后由用户改为本轮引入。
+- **代价**：生成物 gitignored——fresh clone 后必须先跑 `just web-css` 才能 `dx build`/`cargo check`（input.css 头注释已写明）。
+- 日期：2026-09-30（用户拍板）
