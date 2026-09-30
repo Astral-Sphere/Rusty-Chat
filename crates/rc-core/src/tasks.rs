@@ -311,6 +311,21 @@ mod tests {
     }
 
     #[test]
+    fn prompt_middletruncate_odd_n_splits_head_heavy() {
+        // n=7 → head ceil(7/2)=4 from the start, tail 3 from the END
+        let long = "0123456789abcdef";
+        assert_eq!(
+            replace_prompt_variable("{{prompt:middletruncate:7}}", Some(long)),
+            "0123...def"
+        );
+        // n=1 → head 1, tail 0
+        assert_eq!(
+            replace_prompt_variable("{{prompt:middletruncate:1}}", Some(long)),
+            "0..."
+        );
+    }
+
+    #[test]
     fn prompt_without_user_message_becomes_empty() {
         assert_eq!(replace_prompt_variable("a {{prompt}} b", None), "a  b");
     }
@@ -358,6 +373,13 @@ mod tests {
         // invalid filter → the Python regex matches nothing → template kept
         let out = replace_messages_variable("{{MESSAGES|bogus}}", &m);
         assert_eq!(out, "{{MESSAGES|bogus}}");
+        // invalid COUNT → `\w+:\d+` no longer matches → the whole variable
+        // stays verbatim in the template (Python regex parity)
+        let out = replace_messages_variable("{{MESSAGES:START:1|start:abc}}", &m);
+        assert_eq!(out, "{{MESSAGES:START:1|start:abc}}");
+        // count 0 → truncates to the empty string
+        let out = replace_messages_variable("{{MESSAGES:START:1|start:0}}", &m);
+        assert_eq!(out, "USER: ");
     }
 
     #[test]
@@ -412,6 +434,17 @@ mod tests {
     #[test]
     fn extract_title_no_fallbacks_available() {
         assert_eq!(extract_title("nothing", None, None), "");
+    }
+
+    #[test]
+    fn extract_title_non_string_title_falls_back_like_missing_key() {
+        // Python .get('title', user_message) returns ANY type; only a falsy
+        // result falls through. A non-string title reaches the Rust as_str()
+        // miss → treated like a missing key → user_message
+        let out = extract_title("{\"title\": 42}", Some("first"), Some("user asked"));
+        assert_eq!(out, "user asked");
+        let out = extract_title("{\"title\": true}", Some("first"), Some("user asked"));
+        assert_eq!(out, "user asked");
     }
 
     // --- fallback truncation -------------------------------------------------

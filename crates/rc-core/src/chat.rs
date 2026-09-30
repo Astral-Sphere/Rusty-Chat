@@ -297,12 +297,13 @@ mod tests {
 
     // 覆盖矩阵：
     // ✅ Form 解析：已知字段 + extra passthrough（temperature 等参数不丢）
-    // ✅ Accumulator：内容拼接、reasoning 拼接、tool_calls 按分片聚合、
-    //    usage/done 记录
+    // ✅ Accumulator：内容/reasoning 拼接、tool_calls 按分片聚合（含多
+    //    index 交错）、usage/done 记录、Done{None} 不覆盖已有 finish_reason、
+    //    id-only 工具分片、空累加器 → 单个空 message item
     // ✅ into_output_items：纯文本 → [message]；带 reasoning → [reasoning,
     //    message]；纯工具调用 → [function_call…]
-    // ✅ assistant_message：tool_calls 组装回 OpenAI 形状
-    // ✅ content_text：字符串/数组/其他
+    // ✅ assistant_message：tool_calls 组装回 OpenAI 形状 + reasoning_content
+    // ✅ content_text：字符串/数组（typed parts + 裸字符串元素）/其他
     // ⛔ 刻意不覆盖：多模态 content parts（M2）
 
     #[test]
@@ -377,8 +378,87 @@ mod tests {
         assert_eq!(kinds, vec!["reasoning", "message", "function_call"]);
 
         let assistant = acc.assistant_message();
-        let calls = assistant.tool_calls.unwrap();
+        // reasoning surfaces as reasoning_content for tool-loop continuation
+        assert_eq!(
+            assistant.reasoning_content.as_deref(),
+            Some("thinking"),
+            "{assistant:?}"
+        );
+        let calls = assistant.tool_calls.clone().unwrap();
         assert_eq!(calls[0]["function"]["name"], json!("get_weather"));
+    }
+
+    #[test]
+    fn done_with_none_keeps_existing_finish_reason() {
+        let mut acc = OutputAccumulator::default();
+        acc.push(&StreamDelta::Done {
+            finish_reason: Some("tool_calls".into()),
+        });
+        // vLLM/openai-interface may emit a trailing Done{None}; it must not
+        // clobber the real stop reason
+        acc.push(&StreamDelta::Done {
+            finish_reason: None,
+        });
+        assert_eq!(acc.finish_reason.as_deref(), Some("tool_calls"));
+    }
+
+    #[test]
+    fn interleaved_tool_call_indices_merge_independently() {
+        let mut acc = OutputAccumulator::default();
+        for delta in [
+            StreamDelta::ToolCall {
+                index: 0,
+                id: Some("call-0".into()),
+                name: Some("fn_a".into()),
+                arguments_delta: "{\"a\"".into(),
+            },
+            StreamDelta::ToolCall {
+                index: 1,
+                id: Some("call-1".into()),
+                name: Some("fn_b".into()),
+                arguments_delta: "{\"b\"".into(),
+            },
+            StreamDelta::ToolCall {
+                index: 0,
+                id: None,
+                name: None,
+                arguments_delta: ":1}".into(),
+            },
+            StreamDelta::ToolCall {
+                index: 1,
+                id: None,
+                name: None,
+                arguments_delta: ":2}".into(),
+            },
+        ] {
+            acc.push(&delta);
+        }
+        assert_eq!(acc.tool_calls.len(), 2);
+        assert_eq!(acc.tool_calls[0].arguments, "{\"a\":1}");
+        assert_eq!(acc.tool_calls[1].arguments, "{\"b\":2}");
+        assert_eq!(acc.tool_calls[1].id, "call-1");
+    }
+
+    #[test]
+    fn empty_accumulator_produces_empty_message_item() {
+        // a provider that streams nothing still yields one (empty) message
+        let items = OutputAccumulator::default().into_output_items();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].kind, "message");
+        assert_eq!(items[0].content, Some(json!("")));
+    }
+
+    #[test]
+    fn tool_call_id_only_fragment_keeps_empty_name() {
+        let mut acc = OutputAccumulator::default();
+        acc.push(&StreamDelta::ToolCall {
+            index: 0,
+            id: Some("c1".into()),
+            name: None,
+            arguments_delta: String::new(),
+        });
+        assert_eq!(acc.tool_calls[0].id, "c1");
+        assert_eq!(acc.tool_calls[0].name, "");
     }
 
     #[test]
@@ -400,6 +480,11 @@ mod tests {
         assert_eq!(content_text(&json!("plain")), "plain");
         assert_eq!(
             content_text(&json!([{"type": "text", "text": "a"}, {"type": "text", "text": "b"}])),
+            "ab"
+        );
+        // legacy providers put bare strings inside the parts array
+        assert_eq!(
+            content_text(&json!(["a", {"type": "text", "text": "b"}])),
             "ab"
         );
         assert_eq!(content_text(&json!(null)), "");

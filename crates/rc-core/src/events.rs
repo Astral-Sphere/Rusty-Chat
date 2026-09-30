@@ -96,7 +96,9 @@ mod tests {
 
     // 覆盖矩阵：
     // ✅ WsFrame 形状：{event: "events", data: {chat_id, message_id, data}}
-    // ✅ 各 event_data 构造器的 type 字段与载荷键名（前端消费契约）
+    // ✅ message_id=None 序列化为显式 null（键存在）
+    // ✅ 各 event_data 构造器的 type 字段与载荷键名（前端消费契约），
+    //    含 message_files；chat:title 的 data 是字符串本身
     // ✅ envelope 序列化
     // ⛔ 刻意不覆盖：citation/embeds 等富类型（M2+）
 
@@ -137,5 +139,29 @@ mod tests {
         );
         assert_eq!(done["data"]["done"], json!(true));
         assert_eq!(done["data"]["usage"]["count"], json!(3));
+    }
+
+    #[test]
+    fn message_files_payload_shape() {
+        let payload = event_data::message_files(json!([{"id": "f1", "name": "a.txt"}]));
+        assert_eq!(payload["type"], json!("chat:message:files"));
+        assert_eq!(payload["data"]["files"][0]["id"], json!("f1"));
+    }
+
+    #[test]
+    fn chat_event_without_message_id_serializes_null() {
+        // frontend contract: chat-level events (title/active) carry an
+        // explicit null message_id, not a missing key
+        let frame = WsFrame::chat_event("c1", None, event_data::chat_title("T"));
+        let v = serde_json::to_value(&frame).unwrap();
+        assert_eq!(v["data"]["message_id"], json!(null));
+        assert!(v["data"].get("message_id").is_some());
+    }
+
+    #[test]
+    fn title_payload_is_the_string_itself() {
+        // chat:title data is the raw title string (frontend chatTitle.set(data))
+        let payload = event_data::chat_title("Greetings");
+        assert_eq!(payload["data"], json!("Greetings"));
     }
 }

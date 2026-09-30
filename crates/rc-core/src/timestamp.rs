@@ -92,6 +92,13 @@ impl Nanos {
 mod tests {
     use super::*;
 
+    // 覆盖矩阵：
+    // ✅ now() 单位量级（秒 vs 纳秒，混合即失败）
+    // ✅ from_raw 无损读 DB 值（不做单位换算）；as_i64/to_owned_string/From
+    // ✅ from_nanos_floor 截断（含负数向 -∞）；from_secs 往返与 i64 极值饱和
+    // ✅ serde transparent：JSON 载荷与 DB 列同为裸整数
+    // ⛔ 刻意不覆盖：时钟回拨（SystemTime 语义，OS 层面）
+
     /// 2026-09-15 falls in this range; anything outside means we mixed units.
     const SECS_MIN: i64 = 1_700_000_000; // 2023-11
     const SECS_MAX: i64 = 2_000_000_000; // 2033-05
@@ -133,5 +140,24 @@ mod tests {
         assert_eq!(serde_json::to_string(&Nanos(456)).unwrap(), "456");
         assert_eq!(serde_json::from_str::<Secs>("123").unwrap(), Secs(123));
         assert_eq!(serde_json::from_str::<Nanos>("456").unwrap(), Nanos(456));
+    }
+
+    #[test]
+    fn raw_and_conversions_are_lossless() {
+        // from_raw is for DB-read values — no unit conversion must happen
+        assert_eq!(Secs::from_raw(1_757_890_000).as_i64(), 1_757_890_000);
+        assert_eq!(Nanos::from_raw(-5).as_i64(), -5);
+        assert_eq!(Secs(42).to_owned_string(), "42");
+        assert_eq!(i64::from(Nanos::from_raw(7)), 7);
+        assert_eq!(i64::from(Secs::from_raw(9)), 9);
+    }
+
+    #[test]
+    fn from_secs_saturates_at_extreme() {
+        // i64::MAX seconds × 1e9 overflows i64 — saturate instead of wrapping
+        let huge = Nanos::from_secs(Secs(i64::MAX));
+        assert_eq!(huge.0, i64::MAX);
+        // ordering derives: Secs unit ≪ Nanos unit on the same wall clock
+        assert!(Nanos::from_secs(Secs(1)).0 > Secs(1).0);
     }
 }
