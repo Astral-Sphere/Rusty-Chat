@@ -9,10 +9,16 @@
 //! ✅ active_path：currentId 向上回溯 → 根到叶顺序；parentId 缺失/为 null
 //!    的根消息；环引用防护（visited 集合）；currentId 缺失/为空 → 空 path
 //! ✅ siblings_of：有 parent → parent.childrenIds 顺序；根消息 → 所有
-//!    parentId 为 null 的消息按 timestamp 排序；消息不存在 → 空
-//! ✅ edit path：编辑重发所需的 messages 数组（祖先链 + 编辑后内容）
-//! ⛔ 刻意不覆盖：树写操作（后端 upsert_message_to_history 维护
-//!    childrenIds/currentId，契约测试覆盖）；UI 状态
+//!    parentId 为 null 的消息按 timestamp 排序；消息不存在 → 空；悬空父 → 空
+//! ✅ leaf_descendant：youngest-child 链；分叉取末位；2-节点环/自环截断
+//! ✅ edit path：编辑重发所需的 messages 数组（祖先链 + 编辑后内容）；
+//!    祖先环截断；"" 与 None 等价；悬空 parent
+//! ✅ attach：空 history 建根；编辑产生兄弟分支；follow-up 接叶子；重复
+//!    attach 不重复链；不存在 parent（插节点不链接）；无 id no-op；
+//!    非 object history 重置；placeholder 的 model 字段
+//! ✅ sibling_position：消息不在父 childrenIds → (0, n)（钉死已知状态）
+//! ⛔ 刻意不覆盖：树写操作的服务端语义（后端 upsert_message_to_history
+//!    维护 childrenIds/currentId，契约测试覆盖）；UI 状态（Signal 依赖）
 
 use serde_json::Value;
 
@@ -105,9 +111,12 @@ pub fn sibling_position(history: &Value, message_id: &str) -> (usize, usize) {
 /// The last descendant of `message_id` following the youngest-child chain —
 /// branch navigation lands on the leaf so the whole branch shows
 /// (open-webui Messages.svelte showPrevious/NextMessage semantics).
+/// Corrupt blobs with cyclic `childrenIds` are cut at the first revisit.
 pub fn leaf_descendant(history: &Value, message_id: &str) -> String {
     let messages = messages_of(history);
     let mut current = message_id.to_string();
+    let mut visited = std::collections::HashSet::new();
+    visited.insert(current.clone());
     loop {
         let Some(next) = messages
             .get(&current)
@@ -119,7 +128,7 @@ pub fn leaf_descendant(history: &Value, message_id: &str) -> String {
         else {
             return current;
         };
-        if next == current {
+        if !visited.insert(next.clone()) {
             return current;
         }
         current = next;
@@ -351,6 +360,31 @@ mod tests {
         assert_eq!(leaf_descendant(&history, "u1"), "a3");
     }
 
+    #[test]
+    fn leaf_descendant_cuts_two_node_cycle() {
+        // corrupt/hostile blob: childrenIds form a cycle — must terminate
+        let history = json!({
+            "currentId": "x",
+            "messages": {
+                "x": {"id": "x", "parentId": null, "childrenIds": ["y"], "role": "user", "content": "x"},
+                "y": {"id": "y", "parentId": "x", "childrenIds": ["x"], "role": "assistant", "content": "y"},
+            }
+        });
+        // walk x → y; y's child x is already visited → stop at y
+        assert_eq!(leaf_descendant(&history, "x"), "y");
+    }
+
+    #[test]
+    fn leaf_descendant_self_loop_returns_node() {
+        let history = json!({
+            "currentId": "x",
+            "messages": {
+                "x": {"id": "x", "parentId": null, "childrenIds": ["x"], "role": "user", "content": "x"},
+            }
+        });
+        assert_eq!(leaf_descendant(&history, "x"), "x");
+    }
+
     // --- local tree mutation (attach) ---------------------------------------
 
     #[test]
@@ -421,5 +455,93 @@ mod tests {
             messages,
             vec![json!({"role": "user", "content": "q1 edited"})]
         );
+    }
+
+    // --- degenerate-input pins (corrupt / hostile blobs) ---------------------
+
+    #[test]
+    fn attach_to_missing_parent_inserts_without_child_link() {
+        // pinned semantics: the node is added and becomes current, but no
+        // childrenIds link exists for a parent that is not in the tree
+        let mut history = json!({"currentId": null, "messages": {}});
+        attach_user_message(&mut history, Some("ghost"), "u1", "hello", 1);
+        assert_eq!(history["currentId"], json!("u1"));
+        assert!(history["messages"]["u1"].is_object());
+        assert!(history["messages"].get("ghost").is_none());
+    }
+
+    #[test]
+    fn attach_node_without_id_is_noop() {
+        let mut history = json!({"currentId": null, "messages": {}});
+        attach_message(&mut history, json!({"role": "user", "content": "x"}), None);
+        assert_eq!(history["currentId"], json!(null));
+        assert_eq!(history["messages"].as_object().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn attach_on_non_object_history_resets_it() {
+        for mut bad in [json!([1, 2]), json!("nope"), json!(7)] {
+            attach_user_message(&mut bad, None, "u1", "hello", 1);
+            assert_eq!(active_path(&bad), vec!["u1"]);
+        }
+    }
+
+    #[test]
+    fn siblings_of_dangling_parent_is_empty() {
+        let history = json!({
+            "currentId": "u1",
+            "messages": {
+                "u1": {"id": "u1", "parentId": "ghost", "childrenIds": [], "role": "user", "content": "x"},
+            }
+        });
+        assert!(siblings_of(&history, "u1").is_empty());
+    }
+
+    #[test]
+    fn assistant_placeholder_carries_model_field() {
+        let mut history = Value::Null;
+        attach_user_message(&mut history, None, "u1", "hello", 1);
+        attach_assistant_placeholder(&mut history, "u1", "a1", 2, "llama3:8b");
+        assert_eq!(history["messages"]["a1"]["model"], json!("llama3:8b"));
+    }
+
+    #[test]
+    fn regeneration_empty_parent_equals_none_and_dangling_parent() {
+        let history = linear_history();
+        let from_none = messages_for_regeneration(&history, None, "e");
+        let from_empty = messages_for_regeneration(&history, Some(""), "e");
+        assert_eq!(from_none, from_empty);
+        // dangling parent id: only the edited message survives
+        let from_ghost = messages_for_regeneration(&history, Some("ghost"), "e");
+        assert_eq!(from_ghost, vec![json!({"role": "user", "content": "e"})]);
+    }
+
+    #[test]
+    fn regeneration_cuts_ancestor_cycle() {
+        let history = json!({
+            "currentId": "u1",
+            "messages": {
+                "u1": {"id": "u1", "parentId": "a1", "childrenIds": [], "role": "user", "content": "x"},
+                "a1": {"id": "a1", "parentId": "u1", "childrenIds": [], "role": "assistant", "content": "y"},
+            }
+        });
+        let messages = messages_for_regeneration(&history, Some("u1"), "e");
+        assert_eq!(
+            messages,
+            vec![
+                json!({"role": "assistant", "content": "y"}),
+                json!({"role": "user", "content": "x"}),
+                json!({"role": "user", "content": "e"}),
+            ]
+        );
+    }
+
+    #[test]
+    fn sibling_position_unknown_message_in_known_children_is_zero_indexed() {
+        // blob inconsistency: message missing from its parent's childrenIds
+        // → (0, n) — pinned so the UI's ‹ 0/2 › rendering is a known state
+        let mut history = linear_history();
+        history["messages"]["a3"] = json!({"id": "a3", "parentId": "u2", "childrenIds": [], "role": "assistant", "content": "r3", "timestamp": 5});
+        assert_eq!(sibling_position(&history, "a3"), (0, 1));
     }
 }
