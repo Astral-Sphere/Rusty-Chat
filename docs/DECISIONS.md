@@ -79,3 +79,9 @@
 - **实现约束**：Tailwind v4 `@theme` 把灰阶整体替换为 OWU 的消色差色阶（oklch→hex 近似，扩展 gray-850=#262626）；body=#171717、面板=gray-950(#0d0d0d)；图标是 `web/src/icons.rs` 内联 lucide 风格 SVG（无资产/无 JS）；时间分组与相对时间是 `sidebar.rs` 纯函数（Hinnant civil_from_days，tz 偏移注入，host 测试）。事件处理遵循：**调 `.set()` 的闭包是 FnMut 不可多处分发**——多目标动作写成接收 Signal 拷贝的自由函数。
 - **被否**：引入组件库/JS 运行时（违反 D-014）；亮色主题（工作量大、用户截图即深色）；原生 `select` 模型选择器（样式不可控）。
 - 日期：2026-10-01（用户要求对照原版界面修改）
+
+## D-016 parse_duration 与 Python 的刻意分歧（钉死不追平）
+- **决策**：`rc-auth::duration::parse_duration` 保留两处与 open-webui `utils/misc.py` 的行为分歧并用测试钉死：① `"-5s"` → 我们解析为 **+5s**（Python findall 接受负号得负 timedelta）；② `"1.2.3d"` → 我们**报错**（Python findall 匹配其中 `"2.3d"` = 2.3 天）。
+- **理由**：open-webui 全部消费方（`auth.jwt_expiry` 等）都是非负的简单时长串，负值/多点数字不在配置面上；追平需要复刻 Python 正则的部分匹配怪癖，反而引入误配置风险。`0s`→Finite(0)（裸 `0` 才是 Never 哨兵）与极大值饱和行为同样钉死。
+- **被否**：完全照抄 Python 正则（含负时长语义）；把这些输入当 panic（错误应显式 BadRequest）。
+- 日期：2026-10-01（M1 测试加固）

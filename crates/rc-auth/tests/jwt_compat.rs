@@ -13,6 +13,14 @@
 //! If Rusty-Chat decodes this token, our HS256 wire format, claim names and
 //! epoch-second timestamps match open-webui's tokens exactly (and vice
 //! versa: `rc_auth::create_token` output is structurally identical).
+//!
+//! 覆盖矩阵（真实基准互操作，非记忆编造——基准 token/hash 见上方生成脚本）:
+//! ✅ PyJWT 签发的 HS256 token 可被 decode_token（claim 名/单位/结构一致）
+//! ✅ 错误密钥的 PyJWT token 拒绝
+//! ✅ Python bcrypt 4.x hash 可被 verify_password（cost 12 基准）
+//! ⛔ 刻意不覆盖：argon2 的 Python 互操作（OWU argon2 走 passlib 同为
+//!    PHC 字符串，单元测试已锁 $argon2 前缀语义）；JWT 算法语义在
+//!    src/jwt.rs 单测覆盖
 
 use rc_auth::{Claims, decode_token};
 

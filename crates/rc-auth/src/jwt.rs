@@ -76,9 +76,11 @@ mod tests {
     // ✅ jti 唯一（两次签发不同）
     // ✅ 无 exp 的 token 可解码（服务型 token）
     // ✅ 过期 token 拒绝
-    // ✅ 错误密钥 / 篡改 payload / 错误算法 拒绝
+    // ✅ 错误密钥 / 篡改 payload / 错误算法（HS512 + 正确密钥）拒绝
+    // ✅ extra claims（flatten 未知键）往返保留
     // ✅ HS256 头（与 PyJWT 兼容格式）
-    // ⛔ 刻意不覆盖：Redis 吊销（M7）
+    // ⛔ 刻意不覆盖：Redis 吊销（M7）、alg:none 签名（jsonwebtoken 不支持
+    //    编码 none；HS512 用例已覆盖算法钉死语义）
 
     const SECRET: &str = "test-secret-0123456789";
 
@@ -151,5 +153,52 @@ mod tests {
         let header = jsonwebtoken::decode_header(&token).unwrap();
         assert_eq!(header.alg, Algorithm::HS256);
         assert_eq!(header.typ.as_deref(), Some("JWT"));
+    }
+
+    #[test]
+    fn rejects_wrong_algorithm_token() {
+        // HS512-signed with the CORRECT secret must still be rejected:
+        // Validation::new(HS256) pins the algorithm (prevents alg confusion)
+        let claims = Claims {
+            id: "u".into(),
+            exp: None,
+            iat: 1,
+            jti: "j".into(),
+            extra: Default::default(),
+        };
+        let token = jsonwebtoken::encode(
+            &Header::new(Algorithm::HS512),
+            &claims,
+            &EncodingKey::from_secret(SECRET.as_bytes()),
+        )
+        .unwrap();
+        assert_eq!(
+            jsonwebtoken::decode_header(&token).unwrap().alg,
+            Algorithm::HS512
+        );
+        assert!(decode_token(&token, SECRET).is_err());
+    }
+
+    #[test]
+    fn decode_preserves_extra_claims() {
+        // open-webui stuffs arbitrary data into tokens; the flattened map
+        // must round-trip unknown keys instead of dropping them
+        let claims = Claims {
+            id: "u".into(),
+            exp: None,
+            iat: 1,
+            jti: "j".into(),
+            extra: [("data".to_string(), serde_json::json!({"role": "admin"}))]
+                .into_iter()
+                .collect(),
+        };
+        let token = jsonwebtoken::encode(
+            &Header::new(ALGORITHM),
+            &claims,
+            &EncodingKey::from_secret(SECRET.as_bytes()),
+        )
+        .unwrap();
+        let decoded = decode_token(&token, SECRET).unwrap();
+        assert_eq!(decoded.extra["data"]["role"], serde_json::json!("admin"));
     }
 }

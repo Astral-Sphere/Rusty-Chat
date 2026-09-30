@@ -105,8 +105,11 @@ mod tests {
     // ✅ bcrypt 往返、错误密码拒绝
     // ✅ 72 字节：verify 截断语义（73 字节密码前 72 字节相同 → 验证通过）
     // ✅ validate_password 对 >72 字节（含多字节字符边界）拒绝
+    // ✅ hash 与 verify 的 72 字节截断一致（对齐 Python bcrypt；signup 由
+    //    validate_password 把关）
     // ✅ argon2 往返 + $argon2 前缀自动识别 + 坏 hash 拒绝
     // ✅ 空 hash 拒绝
+    // ✅ HashAlgorithm::from_env_str（None→bcrypt、argon2、未知→Err）
     // ⛔ 刻意不覆盖：正则密码策略（OWU 默认关闭）
 
     #[test]
@@ -159,5 +162,36 @@ mod tests {
         let ph = placeholder_hash();
         assert!(verify_password("placeholder", &ph));
         assert!(!verify_password("anything-else", &ph));
+    }
+
+    #[test]
+    fn hash_algorithm_from_env_str() {
+        // None defaults to bcrypt (open-webui 0.11.3 default)
+        assert_eq!(
+            HashAlgorithm::from_env_str(None).unwrap(),
+            HashAlgorithm::Bcrypt
+        );
+        assert_eq!(
+            HashAlgorithm::from_env_str(Some("bcrypt")).unwrap(),
+            HashAlgorithm::Bcrypt
+        );
+        assert_eq!(
+            HashAlgorithm::from_env_str(Some("argon2")).unwrap(),
+            HashAlgorithm::Argon2
+        );
+        assert!(HashAlgorithm::from_env_str(Some("scrypt")).is_err());
+        assert!(HashAlgorithm::from_env_str(Some("")).is_err());
+    }
+
+    #[test]
+    fn bcrypt_hash_truncates_at_72_bytes_like_python() {
+        // Python bcrypt.hashpw silently truncates at 72 bytes and the Rust
+        // crate matches — a 73-byte input hashes to its 72-byte prefix.
+        // Signup is gated by validate_password; this pins library parity.
+        let h = hash_password_bcrypt(&"a".repeat(73)).unwrap();
+        assert!(verify_password(&"a".repeat(72), &h));
+        assert!(verify_password(&"a".repeat(73), &h));
+        assert!(!verify_password(&"b".repeat(72), &h));
+        assert!(hash_password("x", HashAlgorithm::Bcrypt).is_ok());
     }
 }

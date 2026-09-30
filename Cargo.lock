@@ -2759,14 +2759,11 @@ version = "0.1.0"
 dependencies = [
  "argon2",
  "bcrypt",
- "hex",
  "jsonwebtoken",
  "rand 0.9.5",
  "rc-core",
- "rc-db",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "uuid",
 ]
 
