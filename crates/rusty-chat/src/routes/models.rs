@@ -7,6 +7,7 @@ use axum::response::{IntoResponse, Response};
 use rc_llm::registry::{BackendConfig, OpenAiConnection, all_base_models};
 use serde_json::{Value, json};
 
+use crate::extract::VerifiedUser;
 use crate::state::AppState;
 
 /// Reads backend connection settings from the config engine.
@@ -93,9 +94,11 @@ pub async fn get_models(State(app): State<AppState>, mut parts: Parts) -> Respon
 
 /// `/ollama/{*path}` reverse proxy (M1: forwards to the FIRST configured
 /// backend; per-model host routing arrives with api_configs in M3).
-/// Streams request and response bodies both ways.
+/// Streams request and response bodies both ways. Login required —
+/// open-webui mounts every /ollama route behind get_verified_user.
 pub async fn ollama_proxy(
     State(app): State<AppState>,
+    VerifiedUser(_user): VerifiedUser,
     method: axum::http::Method,
     uri: axum::http::Uri,
     RawQuery(query): RawQuery,
@@ -127,7 +130,10 @@ pub async fn ollama_proxy(
         return (axum::http::StatusCode::NOT_FOUND, "ollama not configured").into_response();
     }
 
-    let mut target = format!("{}{}", base_urls[0].trim_end_matches('/'), uri.path());
+    // Forward the path WITHOUT the /ollama mount prefix (open-webui mounts
+    // the ollama API under /ollama and proxies the remainder verbatim).
+    let stripped = uri.path().strip_prefix("/ollama").unwrap_or(uri.path());
+    let mut target = format!("{}{}", base_urls[0].trim_end_matches('/'), stripped);
     if let Some(q) = query {
         target.push('?');
         target.push_str(&q);

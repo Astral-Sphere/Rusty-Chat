@@ -13,6 +13,8 @@
 //! ✅ password：错误旧密码 400；正确后新旧密码行为翻转
 //! ✅ api key：默认关闭 403；开启后创建（sk-+32hex）/获取/删除
 //! ✅ signout：200 + 清 cookie
+//! ✅ /ollama/{*path} 代理：匿名 401 → 登录后透传（剥 /ollama 前缀）、
+//!   上游非 200 透传、不可达 502、disabled 404
 //! ⛔ 刻意不覆盖：OAuth/LDAP/trusted-header（M7）、rate limit（M5）
 
 use axum::body::Body;
@@ -509,4 +511,82 @@ async fn api_models_lists_ollama_backend() {
     assert_eq!(data[0]["id"], json!("llama3:8b"));
     // raw ollama tag payload preserved for the frontend
     assert_eq!(data[0]["ollama"]["digest"], json!("d1"));
+}
+
+/// `/ollama/{*path}` reverse proxy contract. Auth first (open-webui mounts
+/// every /ollama route behind get_verified_user), then enable check, then
+/// forwarding semantics. Regression: the proxy used to forward ANONYMOUS
+/// requests straight to the configured ollama backend.
+#[tokio::test]
+async fn ollama_proxy_requires_auth_and_forwards() {
+    use serde_json::json;
+
+    let app = axum::Router::new()
+        .route(
+            "/api/tags",
+            axum::routing::get(|| async { axum::Json(json!({"models": [{"name": "llama3:8b"}]})) }),
+        )
+        .route(
+            "/api/boom",
+            axum::routing::get(|| async { (axum::http::StatusCode::NOT_FOUND, "nope") }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let (mut router, app_state, _dir) = test_app().await;
+    app_state
+        .config
+        .upsert("ollama.enable", &json!(true))
+        .await
+        .unwrap();
+    app_state
+        .config
+        .upsert("ollama.base_urls", &json!([format!("http://{addr}")]))
+        .await
+        .unwrap();
+
+    // anonymous → 401 before any config/forward logic
+    let (status, body, _) = call(&mut router, get_request("/ollama/api/tags", None)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+
+    let (status, body, _) = call(
+        &mut router,
+        json_request(
+            "POST",
+            "/api/v1/auths/signup",
+            json!({"name": "A", "email": "a@example.com", "password": "pw-proxy-1"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let token = body["token"].as_str().unwrap().to_string();
+
+    // authed GET forwards body and status from the backend
+    let (status, body, _) = call(&mut router, get_request("/ollama/api/tags", Some(&token))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["models"][0]["name"], json!("llama3:8b"));
+
+    // upstream non-200 passes through
+    let (status, body, _) = call(&mut router, get_request("/ollama/api/boom", Some(&token))).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+
+    // unreachable backend → 502 with detail
+    app_state
+        .config
+        .upsert("ollama.base_urls", &json!(["http://127.0.0.1:1"]))
+        .await
+        .unwrap();
+    let (status, body, _) = call(&mut router, get_request("/ollama/api/tags", Some(&token))).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    assert!(body["detail"].as_str().unwrap().contains("unreachable"));
+
+    // disabled → 404 (authed user, still not configured)
+    app_state
+        .config
+        .upsert("ollama.enable", &json!(false))
+        .await
+        .unwrap();
+    let (status, body, _) = call(&mut router, get_request("/ollama/api/tags", Some(&token))).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
 }

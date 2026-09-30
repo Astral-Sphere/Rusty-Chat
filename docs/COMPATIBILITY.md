@@ -233,6 +233,7 @@ RPC（`sio.call`）：`execute:python`（pyodide）、`execute:tool`（浏览器
 - **chat blob 树操作**：`upsert_message_to_history` 新消息总是把 `currentId` 移到新消息；`update_chat_by_id` 顶层浅合并 + history 深合并，title 列从合并后 blob 的 `title` 派生（缺→"New Chat"）——因此**任何只写列的标题更新都会被后续 blob 更新覆盖**，必须列+blob 同写（OWU `update_chat_title_by_id` 即如此）。
 - **分支切换**（前端）：open-webui Messages.svelte 语义——兄弟切换后沿 youngest-child 链落到叶子再设 `currentId`（`web/src/branches.rs::leaf_descendant`）。
 - **POST /api/v1/chats/{id}/tags 属主校验在路由层**：OWU `add_tag_by_id_and_tag_name` 先 `get_chat_by_id_and_user_id`，非属主/不存在 → 401 `{"detail": "Not found"}`（仓库层 `update_chat_tags_by_id` 是 id-only——它还服务后台标签生成，不能自带属主过滤）。
+- **/ollama/{*path} 反向代理**：要求登录（OWU 全部 /ollama 路由挂 get_verified_user）；转发时**剥掉 /ollama 前缀**（`/ollama/api/tags` → 上游 `/api/tags`）；M1 只转发第一个 base_url；响应只保留 content-type/cache-control 头；disabled 或无 base_urls → 404 `ollama not configured`；上游不可达 → 502 `{"detail": "ollama unreachable: …"}`。
 - **后端 env 派生**：`OLLAMA_BASE_URLS`/`OPENAI_API_BASE_URLS`/`OPENAI_API_KEYS` 为 `;` 分隔列表；`ENABLE_OLLAMA_API`/`ENABLE_OPENAI_API` 默认 true；`ENABLE_TITLE_GENERATION` 默认 true；`TASK_MODEL`/`TASK_MODEL_EXTERNAL` 默认空。
 
 ## 7. REST API 面（≈250 端点，兼容目标）
