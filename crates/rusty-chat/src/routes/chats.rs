@@ -359,12 +359,23 @@ pub struct UpdateTagsForm {
 }
 
 /// `POST /{id}/tags` — replace a chat's tags (body: {tags: [...]}).
+/// Owner-checked here (OWU routers/chats.py resolves the chat via
+/// get_chat_by_id_and_user_id before touching tags); the repo helper is
+/// id-only because it also serves background tag generation.
 pub async fn update_chat_tags(
     State(app): State<AppState>,
     VerifiedUser(user): VerifiedUser,
     Path(id): Path<String>,
     Json(form): Json<UpdateTagsForm>,
 ) -> Response {
+    let owned = chats::get_chat_by_id_and_user_id(&app.db, &id, &user.id)
+        .await
+        .ok()
+        .flatten()
+        .is_some();
+    if !owned {
+        return unauthorized("Not found");
+    }
     let tag_refs: Vec<&str> = form.tags.iter().map(String::as_str).collect();
     match chats::update_chat_tags_by_id(&app.db, &id, &tag_refs, &user.id).await {
         Ok(()) => {

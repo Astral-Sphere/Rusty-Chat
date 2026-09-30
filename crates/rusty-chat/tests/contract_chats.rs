@@ -9,7 +9,8 @@
 //! ✅ delete：本人可删、他人 401
 //! ✅ pin/archive 切换；archived 列表；pinned 列表
 //! ✅ share：创建→公开读取（无凭据）→删除
-//! ✅ tags：设置→查询→孤儿子清理
+//! ✅ tags：设置→查询→孤儿子清理；非属主 401（OWU 路由层属主校验）；
+//!   不存在 id 401
 //! ✅ search：大小写不敏感标题匹配
 //! ✔ admin 特权路径（M1 未做 admin 特判，与默认路由一致）
 //! ⛔ 刻意不覆盖：fork/clone（M3）、message 级端点（M3）、import/export（M3）
@@ -478,4 +479,113 @@ async fn chats_crud_contract() {
     // tag orphan cleanup happened on tags update of remaining flows; here the
     // chat was deleted AFTER tags were set — orphan cleanup runs on next tag
     // update, not on delete (OWU parity).
+}
+
+/// Tags writes are owner-checked at the ROUTE level (open-webui
+/// routers/chats.py add_tag_by_id_and_tag_name resolves the chat via
+/// get_chat_by_id_and_user_id first). Regression: the repo-level
+/// update_chat_tags_by_id looks the row up by id only, so without the route
+/// check any signed-in user could rewrite another user's chat tags.
+#[tokio::test]
+async fn tags_ownership_contract() {
+    let (mut router, app_state, _dir) = test_app().await;
+
+    let (_, user_a) = call(
+        &mut router,
+        req(
+            "POST",
+            "/api/v1/auths/signup",
+            None,
+            Some(json!({
+                "name": "A", "email": "a2@example.com", "password": "pw-tags-1"
+            })),
+        ),
+    )
+    .await;
+    let token_a = user_a["token"].as_str().unwrap().to_string();
+    app_state
+        .config
+        .upsert("ui.enable_signup", &json!(true))
+        .await
+        .unwrap();
+    let (_, user_b) = call(
+        &mut router,
+        req(
+            "POST",
+            "/api/v1/auths/signup",
+            None,
+            Some(json!({
+                "name": "B", "email": "b2@example.com", "password": "pw-tags-2"
+            })),
+        ),
+    )
+    .await;
+    let token_b = user_b["token"].as_str().unwrap().to_string();
+
+    let (status, chat) = call(
+        &mut router,
+        req(
+            "POST",
+            "/api/v1/chats/new",
+            Some(&token_a),
+            Some(json!({"chat": blob("A Private")})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{chat}");
+    let chat_id = chat["id"].as_str().unwrap().to_string();
+
+    // non-owner cannot replace tags → 401
+    let (status, body) = call(
+        &mut router,
+        req(
+            "POST",
+            &format!("/api/v1/chats/{chat_id}/tags"),
+            Some(&token_b),
+            Some(json!({"tags": ["hijacked"]})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+
+    // the hijack attempt must not have touched A's chat meta
+    let (status, a_tags) = call(
+        &mut router,
+        req(
+            "GET",
+            &format!("/api/v1/chats/{chat_id}/tags"),
+            Some(&token_a),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(a_tags, json!([]), "meta must stay untouched");
+
+    // nonexistent chat id → same 401 (OWU treats missing as unauthorized)
+    let (status, _) = call(
+        &mut router,
+        req(
+            "POST",
+            "/api/v1/chats/00000000-0000-0000-0000-000000000000/tags",
+            Some(&token_a),
+            Some(json!({"tags": ["x"]})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // owner still works end to end
+    let (status, tags) = call(
+        &mut router,
+        req(
+            "POST",
+            &format!("/api/v1/chats/{chat_id}/tags"),
+            Some(&token_a),
+            Some(json!({"tags": ["Work"]})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{tags}");
+    assert_eq!(tags.as_array().unwrap().len(), 1);
 }
