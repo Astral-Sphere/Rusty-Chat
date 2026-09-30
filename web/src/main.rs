@@ -9,7 +9,7 @@
 mod api;
 
 use dioxus::prelude::*;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 #[derive(Clone, Debug)]
 struct ChatEntry {
@@ -32,7 +32,9 @@ fn main() {
 }
 
 fn app() -> Element {
-    let main_css = asset!("/assets/main.css");
+    // Generated from web/input.css by the Tailwind v4 standalone CLI
+    // (`just web-css`; gitignored, regenerate once after a fresh clone).
+    let main_css = asset!("/assets/tailwind.css");
     let mut token = use_signal(api::token);
     let generation_active = use_signal(|| false);
 
@@ -98,11 +100,23 @@ fn login_view(on_signed_in: EventHandler<String>) -> Element {
     let busy = use_signal(|| false);
 
     let submit = move |_| {
-        to_owned![mode_signup, email, password, name, error, busy, on_signed_in];
+        to_owned![
+            mode_signup,
+            email,
+            password,
+            name,
+            error,
+            busy,
+            on_signed_in
+        ];
         async move {
             busy.set(true);
             error.set(String::new());
-            let path = if mode_signup() { "/api/v1/auths/signup" } else { "/api/v1/auths/signin" };
+            let path = if mode_signup() {
+                "/api/v1/auths/signup"
+            } else {
+                "/api/v1/auths/signin"
+            };
             let mut body = json!({"email": email(), "password": password()});
             if mode_signup() {
                 body["name"] = json!(name());
@@ -294,7 +308,10 @@ fn chat_view(token: String, generation_active: Signal<bool>) -> Element {
                     return;
                 }
                 let data = &frame["data"]["data"];
-                let message_id = frame["data"]["message_id"].as_str().unwrap_or_default().to_string();
+                let message_id = frame["data"]["message_id"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string();
                 match data["type"].as_str().unwrap_or_default() {
                     "chat:message:delta" => {
                         let content = data["data"]["content"].as_str().unwrap_or_default();
@@ -327,7 +344,10 @@ fn chat_view(token: String, generation_active: Signal<bool>) -> Element {
         spawn(async move {
             if let Some(id) = chat_id() {
                 if let Ok(chat) = api::api_get(&format!("/api/v1/chats/{id}")).await {
-                    let history = chat["chat"]["history"]["messages"].as_object().cloned().unwrap_or_default();
+                    let history = chat["chat"]["history"]["messages"]
+                        .as_object()
+                        .cloned()
+                        .unwrap_or_default();
                     let mut loaded: Vec<ChatMessageState> = history
                         .iter()
                         .filter_map(|(id, m)| {
@@ -389,7 +409,10 @@ fn chat_view(token: String, generation_active: Signal<bool>) -> Element {
             });
             if let Ok((status, response)) = api::api_post("/api/chat/completions", &body).await {
                 if status != 200 {
-                    let detail = response["detail"].as_str().unwrap_or("request failed").to_string();
+                    let detail = response["detail"]
+                        .as_str()
+                        .unwrap_or("request failed")
+                        .to_string();
                     mark_error(messages, &assistant_id);
                     let _ = detail;
                     generation_done_nonce += 1;

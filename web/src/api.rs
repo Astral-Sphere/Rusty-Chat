@@ -1,7 +1,7 @@
 //! Browser API helpers: localStorage token persistence, HTTP via gloo-net,
 //! a reconnecting WebSocket channel, and a small uuid generator.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use wasm_bindgen::JsCast;
 use web_sys::window;
 

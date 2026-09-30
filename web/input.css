@@ -1,0 +1,6 @@
+/* Tailwind v4 input — compiled by the standalone CLI (no Node/npm):
+     tailwindcss -i input.css -o assets/tailwind.css --minify
+   (just web-css / just web-build run this; the generated file is
+   gitignored — run the recipe once before any bare cargo build in web/). */
+@import "tailwindcss";
+@source "./src/**/*.rs";

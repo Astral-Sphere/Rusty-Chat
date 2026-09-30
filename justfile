@@ -50,8 +50,14 @@ pg-down:
     podman stop rc-pg-fixture
 
 # Build the Dioxus frontend (wasm) into web/dist
-web-build:
+web-build: web-css
     cd web && dx build --release
+
+# Regenerate web/assets/tailwind.css (Tailwind v4 standalone CLI, no Node).
+# The generated file is gitignored — dx build / bare cargo builds in web/
+# need it to exist first. Add --watch in a second terminal during dev.
+web-css:
+    cd web && tailwindcss -i input.css -o assets/tailwind.css --minify
 
 # Full CI gate
 ci:
