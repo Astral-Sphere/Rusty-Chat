@@ -197,19 +197,22 @@ pub fn attach_user_message(
     );
 }
 
-/// Convenience: attach an assistant placeholder node (done=false).
+/// Convenience: attach an assistant placeholder node (done=false). `model`
+/// records the requesting model on the node so the UI can label the response
+/// immediately (the server persists the same field).
 pub fn attach_assistant_placeholder(
     history: &mut Value,
     parent_id: &str,
     assistant_id: &str,
     timestamp: i64,
+    model: &str,
 ) {
     attach_message(
         history,
         serde_json::json!({
             "id": assistant_id, "parentId": parent_id, "childrenIds": [],
             "role": "assistant", "content": "", "done": false,
-            "timestamp": timestamp,
+            "model": model, "timestamp": timestamp,
         }),
         Some(parent_id),
     );
@@ -354,7 +357,7 @@ mod tests {
     fn attach_user_on_empty_history_creates_root_and_current() {
         let mut history = Value::Null;
         attach_user_message(&mut history, None, "u1", "hello", 1);
-        attach_assistant_placeholder(&mut history, "u1", "a1", 2);
+        attach_assistant_placeholder(&mut history, "u1", "a1", 2, "m1");
         assert_eq!(active_path(&history), vec!["u1", "a1"]);
         assert_eq!(history["messages"]["u1"]["childrenIds"], json!(["a1"]));
         assert_eq!(history["messages"]["a1"]["done"], json!(false));
@@ -366,7 +369,7 @@ mod tests {
         // the open-webui edit flow: branch off u1 while currentId is a2
         let mut history = linear_history();
         attach_user_message(&mut history, None, "u1-edited", "q1 edited", 9);
-        attach_assistant_placeholder(&mut history, "u1-edited", "a1-edited", 10);
+        attach_assistant_placeholder(&mut history, "u1-edited", "a1-edited", 10, "m2");
         // new branch is the active path…
         assert_eq!(active_path(&history), vec!["u1-edited", "a1-edited"]);
         // …the old branch is intact…
@@ -383,7 +386,7 @@ mod tests {
         // currentId = a2 → follow-up user message parents onto it
         let current = history["currentId"].as_str().unwrap().to_string();
         attach_user_message(&mut history, Some(&current), "u3", "next question", 9);
-        attach_assistant_placeholder(&mut history, "u3", "a3", 10);
+        attach_assistant_placeholder(&mut history, "u3", "a3", 10, "m3");
         assert_eq!(
             active_path(&history),
             vec!["u1", "a1", "u2", "a2", "u3", "a3"]

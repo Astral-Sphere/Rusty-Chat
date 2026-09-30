@@ -64,8 +64,7 @@ pub async fn api_post(path: &str, body: &Value) -> Result<(u16, Value), String> 
     Ok((status, body))
 }
 
-/// Reserved for M1-7 chat deletion from the sidebar UI.
-#[allow(dead_code)]
+/// DELETE a resource returning (status, json).
 pub async fn api_delete(path: &str) -> Result<(u16, Value), String> {
     let request = auth_headers(Request::delete(&format!("{}{path}", api_base())))
         .build()
@@ -93,6 +92,30 @@ pub fn uuid_v4() -> String {
         &hex[16..20],
         &hex[20..32]
     )
+}
+
+/// Unix epoch seconds. `std::time::SystemTime::now()` is unimplemented on
+/// wasm32-unknown-unknown and panics — read the wall clock from JS instead.
+pub fn epoch_secs() -> i64 {
+    (js_sys::Date::now() / 1000.0) as i64
+}
+
+/// The browser timezone's offset west of UTC in seconds (JS
+/// `getTimezoneOffset` is positive west of UTC, so local = UTC − offset).
+/// Used by the sidebar's calendar-day grouping.
+pub fn tz_offset_secs() -> i64 {
+    let now = js_sys::Date::new_0();
+    (-now.get_timezone_offset() * 60.0) as i64
+}
+
+/// Best-effort clipboard write (fails silently — e.g. non-user-gesture or
+/// unsupported browser).
+pub fn copy_text(text: &str) {
+    let Some(navigator) = web_sys::window().map(|w| w.navigator()) else {
+        return;
+    };
+    // the returned Promise is intentionally ignored (fire-and-forget)
+    drop(navigator.clipboard().write_text(text));
 }
 
 /// Thin wrapper over the browser WebSocket delivering text frames as JSON.

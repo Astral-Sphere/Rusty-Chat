@@ -1,7 +1,7 @@
 # PROGRESS.md — 进度看板（每次交付后必须更新）
 
 > 接手/恢复上下文时**先读本文**，再读 DECISIONS / ARCHITECTURE（见 AGENTS.md §1）。
-> 最后更新：2026-09-30（**M1 全部完成**：7 段 + 收官增强 T1/T2/T3/T4/T1b/T5；下一步 M2 RAG）
+> 最后更新：2026-10-01（M1 完成；前端界面已按 open-webui 0.11.3 深色版 1:1 仿写（D-015）；下一步 M2 RAG）
 
 ## 里程碑总览
 
@@ -88,6 +88,14 @@
 - axum WS：Message::Text 需要 Utf8Bytes（.into()）；Parts/Bytes 顺序在 body extractor 之前。
 - 测试稳定性：updated_at 秒级精度下相邻创建的排序断言必须显式 sleep ≥1.1s（contract_chats 曾因此抖动）。
 - ollama 模型解析依赖 /api/tags——mock 后端别忘了它（只剩 /api/chat 会 404 Model not found）。
+
+## UI 对齐 open-webui（2026-10-01 完成，用户要求对照原版截图仿写）
+
+- [x] **主题**（input.css）：Tailwind `@theme` 整体替换灰阶为 OWU 消色差色阶（gray-950=#0d0d0d…扩展 gray-850=#262626）；body #171717、侧栏 #0d0d0d；细圆角滚动条；`.hover-reveal`（group 悬停显隐）；建议卡 waterfall 入场动画；markdown 排版调至 prose-sm 尺度。
+- [x] **结构**：main.rs 瘦身为壳 + 登录页（深色卡片/胶囊切换）；新 `sidebar.rs`（245px 侧栏 + 42px 折叠栏：新对话/搜索（`/api/v1/chats/search?text=`）/置顶段/日历时间分组（今天/昨天/过去 7 天/过去 30 天/月份，Hinnant civil_from_days + tz 偏移注入，9 测试）/条目 ⋯ 删除菜单/用户菜单）；新 `chat.rs`（navbar 标题、空态占位（模型名点击轮换 + OWU 6 张默认建议卡 + 输入卡）、用户右对齐圆角泡、assistant 头像+模型名+动作行、底部输入卡 + 模型下拉 pill + 圆形发送键、滚动钉底按钮）；新 `icons.rs`（内联 lucide 风格 SVG，无资产无 JS）；`api.rs` 增 epoch_secs/tz_offset_secs/copy_text（Clipboard）。
+- [x] **语义修正**：assistant 占位节点带 `model` 字段（branches.rs，与后端持久化一致）→ 消息头立即显示模型名；置底判定阈值 120→40px（短对话 88px 可滚动距离会被永久钉底）；打开会话后 300ms 二次钉底（mermaid/高亮异步回填后内容再增长）；mermaid 卡 fit-content 居中。
+- [x] **验收**：mock ollama 全链路浏览器冒烟——注册→空态→发送（流式/markdown/KaTeX/tree-sitter 高亮/mermaid）→标题生成（侧栏"今天"分组 + navbar）→编辑原位替换 ‹2/2›→切回 1/2 完整旧链→搜索→删除→折叠/展开→模型下拉→用户菜单。门禁：native 124 + web 56 测试全绿，双 workspace clippy/fmt 干净。
+- **环境注意（自动化）**：ZCode IAB 面板失焦时 `requestAnimationFrame` 完全停摆（visibilityState 仍 "visible"），Dioxus-web 依赖 rAF flush 渲染 → 页面"点击无响应"。上一会话的"CUA 事件零到达"即此。冒烟时先注入 `window.requestAnimationFrame = cb => setTimeout(() => cb(performance.now()), 16)` 替身（仅测试环境，真实浏览器无此问题）。另：Playwright 元素 actionability 检查同样依赖原生 rAF 会超时，用 evaluate `el.click()` 替代。
 
 ## 阻塞/待办
 
