@@ -9,6 +9,7 @@
 mod api;
 mod branches;
 mod highlight;
+mod mermaid;
 mod render;
 
 use dioxus::prelude::*;
@@ -566,10 +567,14 @@ fn message_item(
     // component's lifetime, so a plain once-computed memo is enough.
     let content = message.content.clone();
     let rendered = use_memo(move || render::render_markdown(&content));
-    // after a done render, backfill syntax highlighting into code fences
+    // after a done render: mermaid fences become SVGs (or keep their source
+    // plus an error note), then code fences get syntax-highlight spans
     use_effect(move || {
         rendered();
-        spawn(highlight::backfill_code_blocks());
+        spawn(async move {
+            mermaid::render_mermaid_blocks().await;
+            highlight::backfill_code_blocks().await;
+        });
     });
 
     // local edit state (user messages only)

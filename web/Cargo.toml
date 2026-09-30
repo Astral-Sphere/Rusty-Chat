@@ -22,6 +22,7 @@ web-sys = { version = "0.3", features = ["WebSocket", "MessageEvent", "Window", 
 comrak = { version = "0.55.0", default-features = false }
 katex-rs = { version = "0.3.0", features = ["wasm"] }
 ammonia = "4.2.0"
+sebastian = "0.8.0"
 
 [profile.release]
 opt-level = "z"
