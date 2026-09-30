@@ -126,6 +126,95 @@ pub fn leaf_descendant(history: &Value, message_id: &str) -> String {
     }
 }
 
+fn messages_mut(history: &mut Value) -> &mut serde_json::Map<String, Value> {
+    if !history.is_object() {
+        *history = serde_json::json!({"messages": {}, "currentId": null});
+    }
+    let obj = history.as_object_mut().expect("history is object");
+    let messages = obj
+        .entry("messages")
+        .or_insert_with(|| Value::Object(Default::default()));
+    if !messages.is_object() {
+        *messages = Value::Object(Default::default());
+    }
+    messages.as_object_mut().expect("messages is object")
+}
+
+/// Local tree mutation mirroring what the server's
+/// `upsert_message_to_history` does for a new node (and what open-webui's
+/// editMessage/createMessagePair do client-side): insert the node under
+/// `parent_id`, append it to the parent's `childrenIds`, and move
+/// `currentId` to it. Keeps the local view consistent before the server
+/// round-trip completes.
+pub fn attach_message(history: &mut Value, node: Value, parent_id: Option<&str>) {
+    let node_id = node
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    if node_id.is_empty() {
+        return;
+    }
+    let messages = messages_mut(history);
+    if let Some(parent) = parent_id.filter(|p| !p.is_empty())
+        && let Some(parent_node) = messages.get_mut(parent)
+    {
+        let children = parent_node.as_object_mut().map(|o| {
+            o.entry("childrenIds")
+                .or_insert_with(|| Value::Array(vec![]))
+        });
+        if let Some(Value::Array(children)) = children {
+            let already = children
+                .iter()
+                .any(|c| c.as_str() == Some(node_id.as_str()));
+            if !already {
+                children.push(Value::String(node_id.clone()));
+            }
+        }
+    }
+    messages.insert(node_id.clone(), node);
+    history
+        .as_object_mut()
+        .expect("history is object")
+        .insert("currentId".into(), Value::String(node_id));
+}
+
+/// Convenience: attach a user message node.
+pub fn attach_user_message(
+    history: &mut Value,
+    parent_id: Option<&str>,
+    user_id: &str,
+    content: &str,
+    timestamp: i64,
+) {
+    attach_message(
+        history,
+        serde_json::json!({
+            "id": user_id, "parentId": parent_id, "childrenIds": [],
+            "role": "user", "content": content, "timestamp": timestamp,
+        }),
+        parent_id,
+    );
+}
+
+/// Convenience: attach an assistant placeholder node (done=false).
+pub fn attach_assistant_placeholder(
+    history: &mut Value,
+    parent_id: &str,
+    assistant_id: &str,
+    timestamp: i64,
+) {
+    attach_message(
+        history,
+        serde_json::json!({
+            "id": assistant_id, "parentId": parent_id, "childrenIds": [],
+            "role": "assistant", "content": "", "done": false,
+            "timestamp": timestamp,
+        }),
+        Some(parent_id),
+    );
+}
+
 /// The OpenAI `messages` array for regenerating from an edited user message:
 /// the contents of its ancestor chain plus the edited content itself.
 /// `history_messages` is the blob's messages map; `edited_parent_id` is the
@@ -257,6 +346,57 @@ mod tests {
         history["messages"]["u2"]["childrenIds"] = json!(["a2", "a3"]);
         history["messages"]["a3"] = json!({"id": "a3", "parentId": "u2", "childrenIds": [], "role": "assistant", "content": "r3", "timestamp": 5});
         assert_eq!(leaf_descendant(&history, "u1"), "a3");
+    }
+
+    // --- local tree mutation (attach) ---------------------------------------
+
+    #[test]
+    fn attach_user_on_empty_history_creates_root_and_current() {
+        let mut history = Value::Null;
+        attach_user_message(&mut history, None, "u1", "hello", 1);
+        attach_assistant_placeholder(&mut history, "u1", "a1", 2);
+        assert_eq!(active_path(&history), vec!["u1", "a1"]);
+        assert_eq!(history["messages"]["u1"]["childrenIds"], json!(["a1"]));
+        assert_eq!(history["messages"]["a1"]["done"], json!(false));
+        assert_eq!(history["currentId"], json!("a1"));
+    }
+
+    #[test]
+    fn attach_edit_creates_sibling_and_moves_current_in_place() {
+        // the open-webui edit flow: branch off u1 while currentId is a2
+        let mut history = linear_history();
+        attach_user_message(&mut history, None, "u1-edited", "q1 edited", 9);
+        attach_assistant_placeholder(&mut history, "u1-edited", "a1-edited", 10);
+        // new branch is the active path…
+        assert_eq!(active_path(&history), vec!["u1-edited", "a1-edited"]);
+        // …the old branch is intact…
+        assert_eq!(history["messages"]["u1"]["childrenIds"], json!(["a1"]));
+        assert_eq!(history["messages"]["a2"]["content"], json!("r2"));
+        // …and both roots are switchable siblings
+        assert_eq!(siblings_of(&history, "u1-edited"), vec!["u1", "u1-edited"]);
+        assert_eq!(sibling_position(&history, "u1-edited"), (2, 2));
+    }
+
+    #[test]
+    fn attach_follow_up_extends_active_leaf() {
+        let mut history = linear_history();
+        // currentId = a2 → follow-up user message parents onto it
+        let current = history["currentId"].as_str().unwrap().to_string();
+        attach_user_message(&mut history, Some(&current), "u3", "next question", 9);
+        attach_assistant_placeholder(&mut history, "u3", "a3", 10);
+        assert_eq!(
+            active_path(&history),
+            vec!["u1", "a1", "u2", "a2", "u3", "a3"]
+        );
+        assert_eq!(history["messages"]["a2"]["childrenIds"], json!(["u3"]));
+    }
+
+    #[test]
+    fn attach_twice_does_not_duplicate_child_link() {
+        let mut history = Value::Null;
+        attach_user_message(&mut history, None, "u1", "hello", 1);
+        attach_user_message(&mut history, None, "u1", "hello", 1);
+        assert_eq!(history["messages"].as_object().unwrap().len(), 1);
     }
 
     #[test]

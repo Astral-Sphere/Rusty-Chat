@@ -373,33 +373,18 @@ fn chat_view(
             {
                 let blob_history = chat["chat"]["history"].clone();
                 history.set(blob_history.clone());
-                let loaded: Vec<ChatMessageState> = branches::active_path(&blob_history)
-                    .iter()
-                    .map(|id| {
-                        let m = &blob_history["messages"][id.as_str()];
-                        let (sibling_index, sibling_count) =
-                            branches::sibling_position(&blob_history, id);
-                        ChatMessageState {
-                            id: id.clone(),
-                            role: m["role"].as_str().unwrap_or("user").to_string(),
-                            content: m["content"].as_str().unwrap_or_default().to_string(),
-                            done: m["done"].as_bool().unwrap_or(true),
-                            is_error: false,
-                            sibling_index,
-                            sibling_count,
-                        }
-                    })
-                    .collect();
-                messages.set(loaded);
+                messages.set(build_view(&blob_history));
             }
         });
     });
 
     let send = move |_| {
-        to_owned![input, messages, selected_model, chat_id, selected];
+        to_owned![input, messages, selected_model, chat_id, selected, history];
         async move {
             let content = input().trim().to_string();
+            web_sys::console::log_1(&format!("SEND sig={:?} model={:?}", input(), selected_model()).into());
             if content.is_empty() || selected_model().is_empty() {
+                web_sys::console::log_1(&"SEND early-return".into());
                 return;
             }
             input.set(String::new());
@@ -412,27 +397,49 @@ fn chat_view(
             selected.set(Some(this_chat.clone()));
             chat_id.set(Some(this_chat.clone()));
 
-            messages.push(ChatMessageState::plain(
-                user_message_id.clone(),
-                "user",
-                content.clone(),
-                true,
-            ));
-            messages.push(ChatMessageState::plain(
-                assistant_id.clone(),
-                "assistant",
-                String::new(),
-                false,
-            ));
+            // open-webui submitPrompt semantics: a follow-up parents onto
+            // history.currentId and the LLM receives the full active chain
+            let parent: Option<String> = history()
+                .get("currentId")
+                .and_then(Value::as_str)
+                .filter(|p| !p.is_empty())
+                .map(str::to_string);
+            let chain =
+                branches::messages_for_regeneration(&history(), parent.as_deref(), &content);
+
+            // local tree patch (mirrors the server upsert), then re-project
+            // the view from the active path — keeps everything in position
+            let mut local = history();
+            let now = chrono_secs();
+            branches::attach_user_message(
+                &mut local,
+                parent.as_deref(),
+                &user_message_id,
+                &content,
+                now,
+            );
+            branches::attach_assistant_placeholder(
+                &mut local,
+                &user_message_id,
+                &assistant_id,
+                now,
+            );
+            history.set(local.clone());
+            messages.set(build_view(&local));
 
             let body = json!({
                 "model": selected_model(),
-                "messages": [{"role": "user", "content": content}],
+                "messages": chain,
                 "stream": true,
                 "id": assistant_id,
-                "parent_id": Value::Null, // M1: single-turn roots; follow-ups pass the parent id
+                "parent_id": parent,
                 "chat_id": this_chat,
-                "user_message": {"id": user_message_id, "role": "user", "content": content},
+                "user_message": {
+                    "id": user_message_id,
+                    "parentId": parent,
+                    "role": "user",
+                    "content": content,
+                },
                 "session_id": null,
             });
             if let Ok((status, response)) = api::api_post("/api/chat/completions", &body).await
@@ -467,7 +474,11 @@ fn chat_view(
         }
     };
 
-    // edit a user message → sibling branch with a fresh assistant response
+    // edit a user message → sibling branch with a fresh assistant response.
+    // open-webui editMessage semantics: patch the tree LOCALLY (new sibling
+    // under the old message's parent, currentId moves to the new branch) and
+    // re-project the view from the active path — so the edited message
+    // REPLACES the old one in place instead of appearing at the bottom.
     let on_edit_save = {
         to_owned![
             history,
@@ -492,18 +503,23 @@ fn chat_view(
                 let new_user_id = api::uuid_v4();
                 let new_assistant_id = api::uuid_v4();
 
-                messages.push(ChatMessageState::plain(
-                    new_user_id.clone(),
-                    "user",
-                    content.clone(),
-                    true,
-                ));
-                messages.push(ChatMessageState::plain(
-                    new_assistant_id.clone(),
-                    "assistant",
-                    String::new(),
-                    false,
-                ));
+                let mut local = history();
+                let now = chrono_secs();
+                branches::attach_user_message(
+                    &mut local,
+                    parent.as_deref(),
+                    &new_user_id,
+                    &content,
+                    now,
+                );
+                branches::attach_assistant_placeholder(
+                    &mut local,
+                    &new_user_id,
+                    &new_assistant_id,
+                    now,
+                );
+                history.set(local.clone());
+                messages.set(build_view(&local));
 
                 let body = json!({
                     "model": selected_model(),
@@ -560,14 +576,50 @@ fn chat_view(
                     class: "w-full px-3 py-2 rounded bg-gray-800",
                     placeholder: if generation_active() { "generating…" } else { "Message Rusty-Chat" },
                     value: input(),
-                    oninput: move |e| input.set(e.value()),
+                    oninput: move |e| {
+                        input.set(e.value());
+                        web_sys::console::log_1(&format!("ONINPUT sig={:?}", input()).into());
+                    },
                     onkeydown: move |e| {
-                        if e.key() == Key::Enter { spawn(send(())); }
+                        if e.key() == Key::Enter {
+                            web_sys::console::log_1(&"KD-ENTER".into());
+                            spawn(send(()));
+                        }
                     },
                 }
             }
         }
     }
+}
+
+/// Projects the display list from the blob history's active branch path
+/// (root → currentId leaf), each message annotated with its sibling switcher
+/// position. The ONLY source of message order — mutations patch `history`
+/// and re-project, never push onto the list directly.
+fn build_view(history: &Value) -> Vec<ChatMessageState> {
+    branches::active_path(history)
+        .iter()
+        .map(|id| {
+            let m = &history["messages"][id.as_str()];
+            let (sibling_index, sibling_count) = branches::sibling_position(history, id);
+            ChatMessageState {
+                id: id.clone(),
+                role: m["role"].as_str().unwrap_or("user").to_string(),
+                content: m["content"].as_str().unwrap_or_default().to_string(),
+                done: m["done"].as_bool().unwrap_or(true),
+                is_error: false,
+                sibling_index,
+                sibling_count,
+            }
+        })
+        .collect()
+}
+
+/// Unix epoch seconds (matches the server's message timestamps).
+fn chrono_secs() -> i64 {
+    // std::time::SystemTime::now() is unimplemented on
+    // wasm32-unknown-unknown and panics — read the wall clock from JS.
+    (js_sys::Date::now() / 1000.0) as i64
 }
 
 /// Stable per-message key: id + done + content hash. A content change (finalize
