@@ -35,7 +35,9 @@ pub async fn stream_chat(base_url: &str, form: &ChatCompletionForm) -> Result<Ol
     Ok(OllamaDeltaStream {
         inner: Box::pin(response.bytes_stream()),
         buffer: Vec::new(),
+        pending: Default::default(),
         finished: false,
+        done_emitted: false,
         last_finish: None,
     })
 }
@@ -98,17 +100,22 @@ fn truncate(s: &str, n: usize) -> String {
 pub struct OllamaDeltaStream {
     inner: Pin<Box<dyn Stream<Item = reqwest::Result<bytes::Bytes>> + Send>>,
     buffer: Vec<u8>,
+    /// deltas decoded from one ndjson line, drained one poll at a time
+    /// (a single line may carry both thinking and content)
+    pending: std::collections::VecDeque<Result<StreamDelta>>,
     finished: bool,
+    done_emitted: bool,
     last_finish: Option<String>,
 }
 
 impl OllamaDeltaStream {
-    fn parse_line(&mut self, line: &[u8]) -> Option<Result<StreamDelta>> {
+    fn parse_line(&self, line: &[u8]) -> Vec<Result<StreamDelta>> {
+        let mut out = Vec::new();
         let Ok(line) = std::str::from_utf8(line) else {
-            return None;
+            return out;
         };
         let Ok(v) = serde_json::from_str::<Value>(line.trim()) else {
-            return None;
+            return out;
         };
 
         let done = v.get("done").and_then(Value::as_bool).unwrap_or(false);
@@ -118,29 +125,32 @@ impl OllamaDeltaStream {
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
             let eval = v.get("eval_count").and_then(Value::as_u64).unwrap_or(0);
-            return Some(Ok(StreamDelta::Usage {
+            out.push(Ok(StreamDelta::Usage {
                 prompt_tokens: prompt,
                 completion_tokens: eval,
                 total_tokens: Some(prompt + eval),
             }));
+            return out;
         }
-        let message = v.get("message")?;
+        let Some(message) = v.get("message") else {
+            return out;
+        };
         if let Some(thinking) = message.get("thinking").and_then(Value::as_str)
             && !thinking.is_empty()
         {
-            return Some(Ok(StreamDelta::Reasoning {
+            out.push(Ok(StreamDelta::Reasoning {
                 content: thinking.to_string(),
             }));
         }
         if let Some(content) = message.get("content").and_then(Value::as_str)
             && !content.is_empty()
         {
-            return Some(Ok(StreamDelta::Content {
+            out.push(Ok(StreamDelta::Content {
                 content: content.to_string(),
             }));
         }
-        // keep-alive / empty chunks are skipped
-        None
+        // keep-alive / empty chunks produce nothing
+        out
     }
 }
 
@@ -149,18 +159,32 @@ impl Stream for OllamaDeltaStream {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         loop {
-            // drain complete lines from the buffer first
+            if let Some(delta) = self.pending.pop_front() {
+                if let Ok(StreamDelta::Usage { .. }) = &delta {
+                    self.last_finish = Some("stop".to_string());
+                }
+                return Poll::Ready(Some(delta));
+            }
             if let Some(pos) = self.buffer.iter().position(|&b| b == b'\n') {
                 let line: Vec<u8> = self.buffer.drain(..=pos).collect();
-                if let Some(delta) = self.parse_line(&line) {
-                    if let Ok(StreamDelta::Usage { .. }) = &delta {
-                        self.last_finish = Some("stop".to_string());
-                    }
-                    return Poll::Ready(Some(delta));
-                }
+                let deltas = self.parse_line(&line);
+                self.pending.extend(deltas);
                 continue;
             }
             if self.finished {
+                // flush a trailing line that lacks its '\n' terminator
+                if !self.buffer.is_empty() {
+                    let line = std::mem::take(&mut self.buffer);
+                    let deltas = self.parse_line(&line);
+                    self.pending.extend(deltas);
+                    continue;
+                }
+                if !self.done_emitted {
+                    self.done_emitted = true;
+                    return Poll::Ready(Some(Ok(StreamDelta::Done {
+                        finish_reason: self.last_finish.clone().or(Some("stop".to_string())),
+                    })));
+                }
                 return Poll::Ready(None);
             }
             match self.inner.as_mut().poll_next(cx) {
@@ -172,9 +196,6 @@ impl Stream for OllamaDeltaStream {
                 }
                 Poll::Ready(None) => {
                     self.finished = true;
-                    return Poll::Ready(Some(Ok(StreamDelta::Done {
-                        finish_reason: self.last_finish.clone().or(Some("stop".to_string())),
-                    })));
                 }
                 Poll::Pending => return Poll::Pending,
             }
@@ -222,10 +243,12 @@ mod tests {
     // 覆盖矩阵：
     // ✅ payload 构建：消息字符串化、thinking 字段、options 嵌套
     //    （max_tokens→num_predict、stop/temperature 透传）
-    // ✅ ndjson 流：content/thinking 分片、done 行 usage、空行容错、
-    //    跨 TCP 分块的行重组
+    // ✅ ndjson 流：content/thinking 分片、同行 thinking+content 双发、
+    //    done 行 usage、空行/坏行容错、跨 TCP 分块的行重组、
+    //    末行无换行的冲刷、Done 终帧只发一次
     // ✅ 非流式 complete 聚合
-    // ⛔ 刻意不覆盖：ollama 不可达（reqwest 语义，已在 ollama.rs 测）
+    // ⛔ 刻意不覆盖：连接拒绝/上游非 200 的映射（与 stream_chat 同构的
+    //    reqwest 错误路径在 rc-llm 边界批次统一补测）
 
     #[test]
     fn payload_maps_options_and_messages() {
@@ -330,5 +353,83 @@ mod tests {
         let response = complete(&format!("http://{addr}"), &form).await.unwrap();
         assert_eq!(response["choices"][0]["message"]["content"], json!("done"));
         assert_eq!(response["usage"]["total_tokens"], json!(3));
+    }
+
+    #[tokio::test]
+    async fn final_line_without_newline_is_flushed() {
+        // regression: a stream ending mid-line (no trailing \n) used to drop
+        // the buffered final line — losing the usage chunk
+        let ndjson = concat!(
+            r#"{"message":{"role":"assistant","content":"hi"},"done":false}"#,
+            "\n",
+            r#"{"message":{"role":"assistant","content":""},"done":true,"prompt_eval_count":1,"eval_count":2}"#,
+        );
+        let app = axum::Router::new().route(
+            "/api/chat",
+            axum::routing::post(move || {
+                let ndjson = ndjson.to_string();
+                async move {
+                    axum::http::Response::builder()
+                        .header("content-type", "application/x-ndjson")
+                        .body(axum::body::Body::from(ndjson))
+                        .unwrap()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let form: ChatCompletionForm = serde_json::from_value(json!({
+            "model": "m", "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .unwrap();
+        let mut stream = stream_chat(&format!("http://{addr}"), &form).await.unwrap();
+        let mut acc = rc_core::chat::OutputAccumulator::default();
+        while let Some(delta) = stream.next().await {
+            acc.push(&delta.unwrap());
+        }
+        assert_eq!(acc.content, "hi");
+        assert_eq!(acc.usage, Some((1, 2, Some(3))));
+        assert_eq!(acc.finish_reason.as_deref(), Some("stop"));
+    }
+
+    #[tokio::test]
+    async fn thinking_and_content_in_one_line_both_emitted() {
+        // regression: the thinking branch early-returned, silently dropping
+        // content that arrived on the same ndjson line
+        let ndjson = concat!(
+            r#"{"message":{"role":"assistant","thinking":"why","content":"ans"},"done":false}"#,
+            "\n",
+            r#"{"message":{"role":"assistant","content":""},"done":true}"#,
+            "\n",
+        );
+        let app = axum::Router::new().route(
+            "/api/chat",
+            axum::routing::post(move || {
+                let ndjson = ndjson.to_string();
+                async move {
+                    axum::http::Response::builder()
+                        .header("content-type", "application/x-ndjson")
+                        .body(axum::body::Body::from(ndjson))
+                        .unwrap()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let form: ChatCompletionForm = serde_json::from_value(json!({
+            "model": "m", "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .unwrap();
+        let mut stream = stream_chat(&format!("http://{addr}"), &form).await.unwrap();
+        let mut acc = rc_core::chat::OutputAccumulator::default();
+        while let Some(delta) = stream.next().await {
+            acc.push(&delta.unwrap());
+        }
+        assert_eq!(acc.reasoning, "why");
+        assert_eq!(acc.content, "ans");
     }
 }
