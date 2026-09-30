@@ -63,7 +63,7 @@ pub async fn chat_completion(
     // open-webui: parent_id null → new chat; absent → legacy no-chat-management.
     // serde maps JSON null and absence alike to None for Option<String>, so
     // M1 treats "no chat_id" as new-chat intent (our frontend always sends it).
-    let _is_new_chat = form.chat_id.is_none();
+    let is_new_chat = form.chat_id.is_none();
     let chat_id = match form.chat_id.clone() {
         Some(id) if !id.is_empty() => id,
         _ => Uuid::new_v4().to_string(),
@@ -106,29 +106,13 @@ pub async fn chat_completion(
 
     // ---- stream=false → synchronous OpenAI-shaped JSON ----
     if form.stream == Some(false) {
-        let result = match model.owned_by.as_str() {
-            "ollama" => {
-                let base = ollama_base_for(&app, &model).await;
-                match base {
-                    Some(url) => ollama_adapter::complete(&url, &stream_form).await,
-                    None => Err(rc_core::Error::NotFound(
-                        "ollama backend not configured".into(),
-                    )),
-                }
-            }
-            _ => {
-                let Some(target) = openai_target_for(&app, &model).await else {
-                    return (
-                        StatusCode::NOT_FOUND,
-                        Json(json!({"detail": "Model not found"})),
-                    )
-                        .into_response();
-                };
-                openai_adapter::complete(target, &stream_form).await
-            }
-        };
-        return match result {
+        return match complete_sync(&app, &model, &stream_form).await {
             Ok(body) => Json(body).into_response(),
+            Err(rc_core::Error::NotFound(detail)) => (
+                StatusCode::NOT_FOUND,
+                Json(json!({"detail": detail})),
+            )
+                .into_response(),
             Err(e) => (
                 StatusCode::BAD_GATEWAY,
                 Json(json!({"detail": e.to_string()})),
@@ -152,6 +136,7 @@ pub async fn chat_completion(
             task_message_id,
             task_model,
             stream_form,
+            is_new_chat,
         )
         .await;
     });
@@ -200,6 +185,61 @@ async fn open_provider_stream(
     }
 }
 
+/// Synchronous (stream=false) completion for any model — shared by the
+/// chat pipeline and the task endpoints (`/api/v1/tasks/*`).
+pub(crate) async fn complete_sync(
+    app: &AppState,
+    model: &rc_llm::ModelInfo,
+    form: &ChatCompletionForm,
+) -> rc_core::Result<Value> {
+    match model.owned_by.as_str() {
+        "ollama" => {
+            let base = ollama_base_for(app, model).await;
+            match base {
+                Some(url) => ollama_adapter::complete(&url, form).await,
+                None => Err(rc_core::Error::NotFound(
+                    "ollama backend not configured".into(),
+                )),
+            }
+        }
+        _ => {
+            let Some(target) = openai_target_for(app, model).await else {
+                return Err(rc_core::Error::NotFound(
+                    "openai connection not configured".into(),
+                ));
+            };
+            openai_adapter::complete(target, form).await
+        }
+    }
+}
+
+/// open-webui `get_task_model_id`: keep the requested model unless a
+/// configured task model matches the connection type (local ↔ default,
+/// external ↔ external) and actually exists.
+pub(crate) async fn task_model_id_for(
+    app: &AppState,
+    requested_model_id: &str,
+    models: &[rc_llm::ModelInfo],
+) -> String {
+    let as_str = |v: Option<Value>| {
+        v.and_then(|v| v.as_str().map(str::to_string))
+            .filter(|s| !s.is_empty())
+    };
+    let configured = if models
+        .iter()
+        .find(|m| m.id == requested_model_id)
+        .is_some_and(|m| m.owned_by == "ollama")
+    {
+        as_str(app.config.get("task.model.default").await.ok().flatten())
+    } else {
+        as_str(app.config.get("task.model.external").await.ok().flatten())
+    };
+    match configured {
+        Some(id) if models.iter().any(|m| m.id == id) => id,
+        _ => requested_model_id.to_string(),
+    }
+}
+
 /// Generation task: streams provider deltas as WS `events` frames and
 /// persists the assistant message at the end (or the error).
 async fn run_generation(
@@ -209,6 +249,7 @@ async fn run_generation(
     message_id: String,
     model: rc_llm::ModelInfo,
     form: ChatCompletionForm,
+    is_new_chat: bool,
 ) {
     let emit = |data: Value| {
         let frame = WsFrame::chat_event(&chat_id, Some(&message_id), data);
@@ -287,6 +328,25 @@ async fn run_generation(
                 output.clone(),
                 usage,
             ));
+            // ---- background title generation (first round of a new chat) ----
+            if is_new_chat && !acc.content.is_empty() {
+                let messages: Vec<Value> = form
+                    .messages
+                    .iter()
+                    .map(|m| serde_json::to_value(m).unwrap_or(Value::Null))
+                    .collect();
+                let title_app = app.clone();
+                let title_user = user_id.clone();
+                let title_chat = chat_id.clone();
+                let requested_model = form.model.clone();
+                tokio::spawn(crate::routes::tasks::run_background_title(
+                    title_app,
+                    title_user,
+                    title_chat,
+                    requested_model,
+                    messages,
+                ));
+            }
         }
         Err(e) => {
             tracing::warn!(chat_id = %chat_id, error = %e, "assistant persistence failed");

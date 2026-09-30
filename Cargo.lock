@@ -2774,6 +2774,7 @@ dependencies = [
 name = "rc-core"
 version = "0.1.0"
 dependencies = [
+ "regex",
  "sea-orm",
  "serde",
  "serde_json",

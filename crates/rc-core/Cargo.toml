@@ -13,6 +13,7 @@ thiserror = { workspace = true }
 uuid = { workspace = true }
 time = { workspace = true }
 sea-orm = { workspace = true, optional = true }
+regex = "1.13.1"
 
 [features]
 # `sea-orm` enables `From<sea_orm::DbErr> for Error` so repositories can use `?`.

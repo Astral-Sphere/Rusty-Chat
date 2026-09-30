@@ -10,6 +10,7 @@
 pub mod chat;
 pub mod error;
 pub mod events;
+pub mod tasks;
 pub mod timestamp;
 
 pub use error::Error;

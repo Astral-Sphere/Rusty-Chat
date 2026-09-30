@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 /// OpenAI chat message. `content` stays a raw Value because OpenAI allows a
 /// string OR an array of content parts; M1 sends/receives strings, later
 /// milestones add multimodal parts without a breaking change.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: String,
     #[serde(default)]
@@ -31,7 +31,7 @@ pub struct ChatMessage {
 /// Incoming `/api/chat/completions` body. open-webui accepts an arbitrary
 /// dict and pops its own fields; we mirror that with typed knowns +
 /// `extra` passthrough for provider params (temperature, top_p, tools…).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ChatCompletionForm {
     pub model: String,
     #[serde(default)]

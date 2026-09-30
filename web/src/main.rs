@@ -39,6 +39,8 @@ fn app() -> Element {
     let katex_css = asset!("/assets/katex/katex.min.css");
     let mut token = use_signal(api::token);
     let generation_active = use_signal(|| false);
+    // bumped when a background task changes chat state (title generation)
+    let list_refresh = use_signal(|| 0u32);
 
     rsx! {
         document::Link { rel: "stylesheet", href: main_css }
@@ -50,6 +52,7 @@ fn app() -> Element {
                 chat_list_view {
                     token: token().unwrap_or_default(),
                     generation_active: generation_active(),
+                    refresh: list_refresh,
                     on_sign_out: move |_| {
                         api::clear_token();
                         token.set(None);
@@ -58,35 +61,7 @@ fn app() -> Element {
                 chat_view {
                     token: token().unwrap_or_default(),
                     generation_active: generation_active,
-                }
-            }
-        }
-    }
-}
-
-#[allow(dead_code)]
-fn unused_original_app() -> Element {
-    let mut token = use_signal(api::token);
-    let generation_active = use_signal(|| false);
-
-    if token().is_none() {
-        rsx! {
-            login_view { on_signed_in: move |t| { token.set(Some(t)); } }
-        }
-    } else {
-        rsx! {
-            div { class: "flex h-screen",
-                chat_list_view {
-                    token: token().unwrap_or_default(),
-                    generation_active: generation_active(),
-                    on_sign_out: move |_| {
-                        api::clear_token();
-                        token.set(None);
-                    },
-                }
-                chat_view {
-                    token: token().unwrap_or_default(),
-                    generation_active: generation_active,
+                    list_refresh: list_refresh,
                 }
             }
         }
@@ -198,6 +173,8 @@ fn login_view(on_signed_in: EventHandler<String>) -> Element {
 fn chat_list_view(
     token: String,
     generation_active: bool,
+    // bumped by chat_view when a `chat:title` event rewrites a title
+    refresh: Signal<u32>,
     on_sign_out: EventHandler<()>,
 ) -> Element {
     let chats = use_signal(Vec::<ChatEntry>::new);
@@ -206,6 +183,7 @@ fn chat_list_view(
 
     use_effect(move || {
         reload_nonce();
+        refresh();
         to_owned![chats];
         spawn(async move {
             if let Ok(list) = api::api_get("/api/v1/chats/").await {
@@ -267,12 +245,12 @@ fn chat_list_view(
             }
         }
         // expose selection to sibling via global-ish signal bus
-        div { style: "display:none", {selected_id().map(|i| i).unwrap_or_default()} }
+        div { style: "display:none", {selected_id().unwrap_or_default()} }
     }
 }
 
 #[component]
-fn chat_view(token: String, generation_active: Signal<bool>) -> Element {
+fn chat_view(token: String, generation_active: Signal<bool>, list_refresh: Signal<u32>) -> Element {
     let models = use_signal(Vec::<String>::new);
     let mut selected_model = use_signal(String::new);
     let messages = use_signal(Vec::<ChatMessageState>::new);
@@ -303,7 +281,7 @@ fn chat_view(token: String, generation_active: Signal<bool>) -> Element {
 
     // websocket lifecycle: reconnect when the token changes
     use_effect(move || {
-        to_owned![messages, generation_done_nonce];
+        to_owned![messages, generation_done_nonce, list_refresh];
         spawn(async move {
             let Some(token) = api::token() else { return };
             api::WsChannel::connect(token, move |frame| {
@@ -334,6 +312,10 @@ fn chat_view(token: String, generation_active: Signal<bool>) -> Element {
                         let active = data["data"]["active"].as_bool().unwrap_or(false);
                         generation_active.set(active);
                     }
+                    "chat:title" => {
+                        // sidebar reloads and picks up the new title
+                        list_refresh += 1;
+                    }
                     _ => {}
                 }
             });
@@ -345,28 +327,26 @@ fn chat_view(token: String, generation_active: Signal<bool>) -> Element {
         generation_done_nonce();
         to_owned![messages, chat_id];
         spawn(async move {
-            if let Some(id) = chat_id() {
-                if let Ok(chat) = api::api_get(&format!("/api/v1/chats/{id}")).await {
-                    let history = chat["chat"]["history"]["messages"]
-                        .as_object()
-                        .cloned()
-                        .unwrap_or_default();
-                    let mut loaded: Vec<ChatMessageState> = history
-                        .iter()
-                        .filter_map(|(id, m)| {
-                            Some(ChatMessageState {
-                                id: id.clone(),
-                                role: m["role"].as_str().unwrap_or("user").to_string(),
-                                content: m["content"].as_str().unwrap_or_default().to_string(),
-                                done: m["done"].as_bool().unwrap_or(true),
-                                is_error: false,
-                            })
-                        })
-                        .collect();
-                    // order by timestamp then id
-                    loaded.sort_by_key(|m| m.id.clone());
-                    messages.set(loaded);
-                }
+            if let Some(id) = chat_id()
+                && let Ok(chat) = api::api_get(&format!("/api/v1/chats/{id}")).await
+            {
+                let history = chat["chat"]["history"]["messages"]
+                    .as_object()
+                    .cloned()
+                    .unwrap_or_default();
+                let mut loaded: Vec<ChatMessageState> = history
+                    .iter()
+                    .map(|(id, m)| ChatMessageState {
+                        id: id.clone(),
+                        role: m["role"].as_str().unwrap_or("user").to_string(),
+                        content: m["content"].as_str().unwrap_or_default().to_string(),
+                        done: m["done"].as_bool().unwrap_or(true),
+                        is_error: false,
+                    })
+                    .collect();
+                // order by timestamp then id
+                loaded.sort_by_key(|m| m.id.clone());
+                messages.set(loaded);
             }
         });
     });
@@ -410,16 +390,16 @@ fn chat_view(token: String, generation_active: Signal<bool>) -> Element {
                 "user_message": {"id": user_message_id, "role": "user", "content": content},
                 "session_id": null,
             });
-            if let Ok((status, response)) = api::api_post("/api/chat/completions", &body).await {
-                if status != 200 {
-                    let detail = response["detail"]
-                        .as_str()
-                        .unwrap_or("request failed")
-                        .to_string();
-                    mark_error(messages, &assistant_id);
-                    let _ = detail;
-                    generation_done_nonce += 1;
-                }
+            if let Ok((status, response)) = api::api_post("/api/chat/completions", &body).await
+                && status != 200
+            {
+                let detail = response["detail"]
+                    .as_str()
+                    .unwrap_or("request failed")
+                    .to_string();
+                mark_error(messages, &assistant_id);
+                let _ = detail;
+                generation_done_nonce += 1;
             }
         }
     };

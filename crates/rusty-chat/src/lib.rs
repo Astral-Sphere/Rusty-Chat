@@ -65,6 +65,10 @@ pub fn build_router(app_state: AppState, frontend_dist: &std::path::Path) -> axu
         )
         .route("/ws", axum::routing::get(routes::chat::ws_handler))
         .route(
+            "/api/v1/tasks/title/completions",
+            axum::routing::post(routes::tasks::generate_title),
+        )
+        .route(
             "/api/v1/chats/new",
             axum::routing::post(routes::chats::create_new_chat),
         )

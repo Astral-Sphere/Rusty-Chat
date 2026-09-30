@@ -201,6 +201,24 @@ pub fn default_config() -> BTreeMap<String, serde_json::Value> {
     );
     m.insert("image_generation.enable".into(), serde_json::json!(false));
     m.insert("task.autocomplete.enable".into(), serde_json::json!(false));
+
+    // --- task models (title generation family; M5 adds tags/queries/…) ---
+    // open-webui: TASK_MODEL / TASK_MODEL_EXTERNAL env, empty = unset.
+    let env = |key: &str| std::env::var(key).unwrap_or_default();
+    m.insert("task.model.default".into(), serde_json::json!(env("TASK_MODEL")));
+    m.insert(
+        "task.model.external".into(),
+        serde_json::json!(env("TASK_MODEL_EXTERNAL")),
+    );
+    m.insert("task.model.params".into(), serde_json::json!({}));
+    m.insert(
+        "task.title.enable".into(),
+        serde_json::json!(std::env::var("ENABLE_TITLE_GENERATION")
+            .unwrap_or_else(|_| "True".into())
+            .to_lowercase()
+            == "true"),
+    );
+    m.insert("task.title.prompt_template".into(), serde_json::json!(""));
     m.insert("google_drive.enable".into(), serde_json::json!(false));
     m.insert("onedrive.enable".into(), serde_json::json!(false));
     m.insert("memories.enable".into(), serde_json::json!(true));
