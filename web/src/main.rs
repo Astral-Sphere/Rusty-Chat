@@ -7,6 +7,7 @@
 //! - one app-level WebSocket; events filter by chat_id.
 
 mod api;
+mod render;
 
 use dioxus::prelude::*;
 use serde_json::{Value, json};
@@ -18,7 +19,7 @@ struct ChatEntry {
     active: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 struct ChatMessageState {
     id: String,
     role: String,
@@ -35,11 +36,13 @@ fn app() -> Element {
     // Generated from web/input.css by the Tailwind v4 standalone CLI
     // (`just web-css`; gitignored, regenerate once after a fresh clone).
     let main_css = asset!("/assets/tailwind.css");
+    let katex_css = asset!("/assets/katex/katex.min.css");
     let mut token = use_signal(api::token);
     let generation_active = use_signal(|| false);
 
     rsx! {
         document::Link { rel: "stylesheet", href: main_css }
+        document::Link { rel: "stylesheet", href: katex_css }
         if token().is_none() {
             login_view { on_signed_in: move |t| { token.set(Some(t)); } }
         } else {
@@ -435,13 +438,12 @@ fn chat_view(token: String, generation_active: Signal<bool>) -> Element {
             }
             div { class: "flex-1 overflow-y-auto p-4 space-y-3",
                 for message in messages() {
-                    div {
-                        key: "{message.id}",
-                        class: if message.role == "user" { "ml-auto max-w-xl px-3 py-2 rounded bg-blue-700 whitespace-pre-wrap" }
-                               else if message.is_error { "max-w-xl px-3 py-2 rounded bg-red-900 whitespace-pre-wrap" }
-                               else { "mr-auto max-w-2xl px-3 py-2 rounded bg-gray-800 whitespace-pre-wrap" },
-                        "{message.content}"
-                        if !message.done { span { class: "animate-pulse", "▍" } }
+                    // Keyed on id+done+content hash so the memoized markdown
+                    // render recomputes only when the message actually changes
+                    // (streaming flip, finalize overwrite, server reload).
+                    message_item {
+                        key: "{message_key(&message)}",
+                        message: message.clone(),
                     }
                 }
             }
@@ -455,6 +457,54 @@ fn chat_view(token: String, generation_active: Signal<bool>) -> Element {
                         if e.key() == Key::Enter { spawn(send(())); }
                     },
                 }
+            }
+        }
+    }
+}
+
+/// Stable per-message key: id + done + content hash. A content change (finalize
+/// overwrite, server reload, later edit) creates a fresh component instance so
+/// the memoized markdown render inside recomputes.
+fn message_key(message: &ChatMessageState) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    message.content.hash(&mut hasher);
+    format!("{}-{}-{:016x}", message.id, message.done, hasher.finish())
+}
+
+#[component]
+fn message_item(message: ChatMessageState) -> Element {
+    // The instance key (see message_key) guarantees content is stable for this
+    // component's lifetime, so a plain once-computed memo is enough.
+    let content = message.content.clone();
+    let rendered = use_memo(move || render::render_markdown(&content));
+    let align = if message.role == "user" {
+        "ml-auto max-w-xl"
+    } else {
+        "mr-auto max-w-2xl"
+    };
+    if message.is_error {
+        rsx! {
+            div { class: "max-w-xl px-3 py-2 rounded bg-red-900 whitespace-pre-wrap",
+                "{message.content}"
+            }
+        }
+    } else if message.done {
+        let bg = if message.role == "user" {
+            "bg-blue-700"
+        } else {
+            "bg-gray-800"
+        };
+        rsx! {
+            div { class: "{align} px-3 py-2 rounded {bg} markdown-body",
+                dangerous_inner_html: rendered()
+            }
+        }
+    } else {
+        rsx! {
+            div { class: "{align} px-3 py-2 rounded bg-gray-800 whitespace-pre-wrap",
+                "{message.content}"
+                span { class: "animate-pulse", "▍" }
             }
         }
     }

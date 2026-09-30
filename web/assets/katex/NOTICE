@@ -1,0 +1,16 @@
+web/assets/katex/katex.min.css
+==============================
+
+Vendored from the KaTeX 0.18.5 npm distribution (dist/katex.min.css):
+  https://cdn.jsdelivr.net/npm/katex@0.18.5/dist/katex.min.css
+
+KaTeX is Copyright (c) Khan Academy, released under the MIT License:
+  https://github.com/KaTeX/KaTeX/blob/main/LICENSE
+
+Modification: the 20 woff2 font files from dist/fonts/ are inlined as
+data: URIs (woff/ttf fallbacks dropped) because dx/manganis does not
+process url() references inside CSS. Regenerate with:
+  python3 tools/gen_katex_inline.py   (needs assets/katex/fonts/*.woff2)
+
+Pinned to 0.18.5 because katex-rs 0.3.0 tracks that upstream version —
+bump both together.
