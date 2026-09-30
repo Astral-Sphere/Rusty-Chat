@@ -102,6 +102,30 @@ pub fn sibling_position(history: &Value, message_id: &str) -> (usize, usize) {
     (index, siblings.len())
 }
 
+/// The last descendant of `message_id` following the youngest-child chain —
+/// branch navigation lands on the leaf so the whole branch shows
+/// (open-webui Messages.svelte showPrevious/NextMessage semantics).
+pub fn leaf_descendant(history: &Value, message_id: &str) -> String {
+    let messages = messages_of(history);
+    let mut current = message_id.to_string();
+    loop {
+        let Some(next) = messages
+            .get(&current)
+            .and_then(|m| m.get("childrenIds"))
+            .and_then(Value::as_array)
+            .and_then(|children| children.last())
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        else {
+            return current;
+        };
+        if next == current {
+            return current;
+        }
+        current = next;
+    }
+}
+
 /// The OpenAI `messages` array for regenerating from an edited user message:
 /// the contents of its ancestor chain plus the edited content itself.
 /// `history_messages` is the blob's messages map; `edited_parent_id` is the
@@ -215,6 +239,24 @@ mod tests {
     fn siblings_of_unknown_message_is_empty() {
         assert!(siblings_of(&linear_history(), "ghost").is_empty());
         assert_eq!(sibling_position(&linear_history(), "ghost"), (0, 0));
+    }
+
+    #[test]
+    fn leaf_descendant_follows_youngest_children() {
+        // u1 → a1 → u2 → a2: leaf of u1 (and of a2 itself) is a2
+        let history = linear_history();
+        assert_eq!(leaf_descendant(&history, "u1"), "a2");
+        assert_eq!(leaf_descendant(&history, "a1"), "a2");
+        assert_eq!(leaf_descendant(&history, "a2"), "a2");
+        assert_eq!(leaf_descendant(&history, "ghost"), "ghost");
+    }
+
+    #[test]
+    fn leaf_descendant_picks_last_branch_child() {
+        let mut history = linear_history();
+        history["messages"]["u2"]["childrenIds"] = json!(["a2", "a3"]);
+        history["messages"]["a3"] = json!({"id": "a3", "parentId": "u2", "childrenIds": [], "role": "assistant", "content": "r3", "timestamp": 5});
+        assert_eq!(leaf_descendant(&history, "u1"), "a3");
     }
 
     #[test]

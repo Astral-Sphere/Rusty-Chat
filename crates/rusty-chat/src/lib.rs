@@ -13,6 +13,7 @@ use state::AppState;
 
 /// Full HTTP router: API routes + SPA fallback (when the frontend build
 /// exists). Separated from `serve` so tests can exercise it without ports.
+#[cfg_attr(feature = "embed-frontend", allow(unused_variables))]
 pub fn build_router(app_state: AppState, frontend_dist: &std::path::Path) -> axum::Router {
     let mut router = axum::Router::new()
         .route(
@@ -163,6 +164,11 @@ pub fn build_router(app_state: AppState, frontend_dist: &std::path::Path) -> axu
         .route("/health", axum::routing::get(|| async { "OK" }))
         .with_state(app_state);
 
+    #[cfg(feature = "embed-frontend")]
+    {
+        router = router.fallback(static_handler);
+    }
+    #[cfg(not(feature = "embed-frontend"))]
     if frontend_dist.join("index.html").exists() {
         router = router.fallback_service(
             tower_http::services::ServeDir::new(frontend_dist)
@@ -170,6 +176,39 @@ pub fn build_router(app_state: AppState, frontend_dist: &std::path::Path) -> axu
         );
     }
     router
+}
+
+/// Embedded frontend assets (feature `embed-frontend`). The folder is
+/// relative to this crate's manifest: `web/dist` at the repo root, produced
+/// by `just web-build` (dx build --release + copy).
+#[cfg(feature = "embed-frontend")]
+#[derive(rust_embed::RustEmbed)]
+#[folder = "../../web/dist"]
+struct FrontendAssets;
+
+/// Serves embedded frontend files with an SPA-style index fallback. API-ish
+/// prefixes never fall back to index.html — unmatched API routes 404.
+#[cfg(feature = "embed-frontend")]
+async fn static_handler(uri: axum::http::Uri) -> axum::response::Response {
+    use axum::http::{StatusCode, header};
+    use axum::response::IntoResponse;
+
+    let path = uri.path().trim_start_matches('/');
+    if path.starts_with("api/")
+        || path.starts_with("ollama/")
+        || path.starts_with("openai/")
+        || path == "ws"
+    {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    }
+    let file_path = if path.is_empty() { "index.html" } else { path };
+    let not_found = || (StatusCode::NOT_FOUND, "not found").into_response();
+    let Some(file) = FrontendAssets::get(file_path).or_else(|| FrontendAssets::get("index.html"))
+    else {
+        return not_found();
+    };
+    let mime = mime_guess::from_path(file_path).first_or_octet_stream();
+    ([(header::CONTENT_TYPE, mime.as_ref())], file.data).into_response()
 }
 
 /// Startup sequence shared by `serve` / `create-admin`: connect, guard the

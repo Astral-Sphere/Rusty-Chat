@@ -63,7 +63,6 @@ pub async fn chat_completion(
     // open-webui: parent_id null → new chat; absent → legacy no-chat-management.
     // serde maps JSON null and absence alike to None for Option<String>, so
     // M1 treats "no chat_id" as new-chat intent (our frontend always sends it).
-    let is_new_chat = form.chat_id.is_none();
     let chat_id = match form.chat_id.clone() {
         Some(id) if !id.is_empty() => id,
         _ => Uuid::new_v4().to_string(),
@@ -91,7 +90,7 @@ pub async fn chat_completion(
     } else {
         model.name.as_str()
     };
-    let persist_user = chats_persist_user_message(
+    let created_chat = match chats_persist_user_message(
         &app,
         &user.id,
         &chat_id,
@@ -99,10 +98,14 @@ pub async fn chat_completion(
         &message_id,
         display_name,
     )
-    .await;
-    if let Err(e) = persist_user {
-        tracing::warn!(chat_id = %chat_id, error = %e, "user message persistence failed");
-    }
+    .await
+    {
+        Ok(created) => created,
+        Err(e) => {
+            tracing::warn!(chat_id = %chat_id, error = %e, "user message persistence failed");
+            form.chat_id.is_none()
+        }
+    };
 
     // ---- stream=false → synchronous OpenAI-shaped JSON ----
     if form.stream == Some(false) {
@@ -134,7 +137,7 @@ pub async fn chat_completion(
             task_message_id,
             task_model,
             stream_form,
-            is_new_chat,
+            created_chat,
         )
         .await;
     });
@@ -247,7 +250,7 @@ async fn run_generation(
     message_id: String,
     model: rc_llm::ModelInfo,
     form: ChatCompletionForm,
-    is_new_chat: bool,
+    created_chat: bool,
 ) {
     let emit = |data: Value| {
         let frame = WsFrame::chat_event(&chat_id, Some(&message_id), data);
@@ -327,7 +330,7 @@ async fn run_generation(
                 usage,
             ));
             // ---- background title generation (first round of a new chat) ----
-            if is_new_chat && !acc.content.is_empty() {
+            if created_chat && !acc.content.is_empty() {
                 let messages: Vec<Value> = form
                     .messages
                     .iter()
@@ -356,6 +359,9 @@ async fn run_generation(
 
 /// Persist the incoming user message + assistant placeholder, creating the
 /// chat on first message (open-webui main.py pre-stream persistence).
+/// Returns `Ok(created_chat)` — `created_chat` drives the background title
+/// task (open-webui: title generation only for the request that CREATED the
+/// chat, regardless of who generated the chat id).
 async fn chats_persist_user_message(
     app: &AppState,
     owner_id: &str,
@@ -363,7 +369,7 @@ async fn chats_persist_user_message(
     user_message: Value,
     assistant_message_id: &str,
     model_name: &str,
-) -> rc_core::Result<()> {
+) -> rc_core::Result<bool> {
     let user_message_id = user_message
         .get("id")
         .and_then(Value::as_str)
@@ -418,7 +424,7 @@ async fn chats_persist_user_message(
         &placeholder,
     )
     .await?;
-    Ok(())
+    Ok(!exists)
 }
 
 /// Backend base URL for an ollama model (first backend serving it).

@@ -32,6 +32,14 @@ rc-llm = { version = "0.1.0", path = "../rc-llm" }
 reqwest = { version = "0.13.5", features = ["json", "stream"] }
 rc-realtime = { version = "0.1.0", path = "../rc-realtime" }
 rc-highlight = { version = "0.1.0", path = "../rc-highlight" }
+# `embed-frontend` bakes web/dist into the binary (release single-binary
+# builds; run `just web-build` first so the folder exists). Off by default:
+# dev builds and tests serve from FRONTEND_DIST_DIR instead.
+rust-embed = { version = "8.12.0", optional = true }
+mime_guess = { version = "2.0.5", optional = true }
+
+[features]
+embed-frontend = ["dep:rust-embed", "dep:mime_guess"]
 
 [dev-dependencies]
 http = "1.5.0"

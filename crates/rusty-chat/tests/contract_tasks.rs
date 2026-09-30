@@ -318,7 +318,9 @@ async fn background_title_after_first_round_only() {
     .unwrap();
     ws.next().await; // connected
 
-    // first round → new chat
+    // first round → new chat. The web frontend ALWAYS sends a client-generated
+    // chat_id, so "first round" must be detected by chat creation, not by an
+    // absent chat_id (regression guard for exactly that bug).
     let resp = client
         .post(format!("{base}/api/chat/completions"))
         .bearer_auth(&token)
@@ -327,6 +329,7 @@ async fn background_title_after_first_round_only() {
             "messages": [{"role": "user", "content": "say hello"}],
             "stream": true,
             "id": "assistant-msg-1",
+            "chat_id": "client-generated-chat-id",
             "user_message": {"id": "user-msg-1", "role": "user", "content": "say hello"}
         }))
         .send()

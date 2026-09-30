@@ -468,12 +468,29 @@ async fn chats_flow(db: &DatabaseConnection) {
         .unwrap();
     assert_eq!(untouched.updated_at, updated.updated_at);
 
-    // title-only update
+    // title-only update: column AND blob stay in sync, so a later
+    // update_chat_by_id re-derives the NEW title, not a stale one
+    // (regression: column-only write let branch switches clobber generated
+    // titles back to the blob's "New Chat")
     let titled = chats::update_chat_title_by_id(db, "c1", "Final")
         .await
         .unwrap()
         .unwrap();
     assert_eq!(titled.title.as_deref(), Some("Final"));
+    assert_eq!(
+        titled.chat.as_ref().unwrap()["title"],
+        json!("Final"),
+        "blob title must be updated together with the column"
+    );
+    let rederived = chats::update_chat_by_id(db, "c1", &json!({"summary": "x"}), false)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        rederived.title.as_deref(),
+        Some("Final"),
+        "title must survive a later partial blob update"
+    );
 
     // message upsert via blob path (new assistant message m2)
     let _ = chats::upsert_message_to_chat_by_id_and_message_id(

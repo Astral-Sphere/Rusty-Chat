@@ -61,6 +61,7 @@ fn app() -> Element {
     let generation_active = use_signal(|| false);
     // bumped when a background task changes chat state (title generation)
     let list_refresh = use_signal(|| 0u32);
+    let selected_chat = use_signal(|| None::<String>);
 
     rsx! {
         document::Link { rel: "stylesheet", href: main_css }
@@ -73,6 +74,7 @@ fn app() -> Element {
                     token: token().unwrap_or_default(),
                     generation_active: generation_active(),
                     refresh: list_refresh,
+                    selected: selected_chat,
                     on_sign_out: move |_| {
                         api::clear_token();
                         token.set(None);
@@ -82,6 +84,7 @@ fn app() -> Element {
                     token: token().unwrap_or_default(),
                     generation_active: generation_active,
                     list_refresh: list_refresh,
+                    selected: selected_chat,
                 }
             }
         }
@@ -195,10 +198,12 @@ fn chat_list_view(
     generation_active: bool,
     // bumped by chat_view when a `chat:title` event rewrites a title
     refresh: Signal<u32>,
+    // shared selection: set by the sidebar, consumed by chat_view
+    selected: Signal<Option<String>>,
     on_sign_out: EventHandler<()>,
 ) -> Element {
     let chats = use_signal(Vec::<ChatEntry>::new);
-    let mut selected_id = use_signal(|| None::<String>);
+    let mut selected_id = selected;
     let reload_nonce = use_signal(|| 0u32);
 
     use_effect(move || {
@@ -264,20 +269,34 @@ fn chat_list_view(
                 span { class: "ml-2 text-xs text-gray-600", if generation_active { "generating…" } }
             }
         }
-        // expose selection to sibling via global-ish signal bus
-        div { style: "display:none", {selected_id().unwrap_or_default()} }
     }
 }
 
 #[component]
-fn chat_view(token: String, generation_active: Signal<bool>, list_refresh: Signal<u32>) -> Element {
+fn chat_view(
+    token: String,
+    generation_active: Signal<bool>,
+    list_refresh: Signal<u32>,
+    selected: Signal<Option<String>>,
+) -> Element {
     let models = use_signal(Vec::<String>::new);
     let mut selected_model = use_signal(String::new);
-    let messages = use_signal(Vec::<ChatMessageState>::new);
-    let history = use_signal(Value::default);
+    let mut messages = use_signal(Vec::<ChatMessageState>::new);
+    let mut history = use_signal(Value::default);
     let mut input = use_signal(String::new);
-    let chat_id = use_signal(|| None::<String>);
+    let mut chat_id = use_signal(|| None::<String>);
     let mut generation_done_nonce = use_signal(|| 0u32);
+
+    // sidebar selection drives the open chat; None starts a new chat
+    use_effect(move || {
+        let picked = selected();
+        if picked != chat_id() {
+            chat_id.set(picked);
+            messages.set(Vec::new());
+            history.set(Value::default());
+            generation_done_nonce += 1;
+        }
+    });
 
     // load model list once
     use_effect(move || {
@@ -377,7 +396,7 @@ fn chat_view(token: String, generation_active: Signal<bool>, list_refresh: Signa
     });
 
     let send = move |_| {
-        to_owned![input, messages, selected_model, chat_id];
+        to_owned![input, messages, selected_model, chat_id, selected];
         async move {
             let content = input().trim().to_string();
             if content.is_empty() || selected_model().is_empty() {
@@ -388,6 +407,9 @@ fn chat_view(token: String, generation_active: Signal<bool>, list_refresh: Signa
             let assistant_id = api::uuid_v4();
             let user_message_id = api::uuid_v4();
             let this_chat = chat_id().unwrap_or_else(api::uuid_v4);
+            // keep the shared selection in lockstep (adjacent sets — the
+            // selection effect observes them together and stays a no-op)
+            selected.set(Some(this_chat.clone()));
             chat_id.set(Some(this_chat.clone()));
 
             messages.push(ChatMessageState::plain(
@@ -427,15 +449,17 @@ fn chat_view(token: String, generation_active: Signal<bool>, list_refresh: Signa
         }
     };
 
-    // switch to a sibling branch: point history.currentId at it and reload
+    // switch to a sibling branch: currentId lands on the sibling's LEAF
+    // (open-webui semantics) so the whole branch shows, then reload
     let on_switch = {
-        to_owned![chat_id, generation_done_nonce];
+        to_owned![chat_id, history, generation_done_nonce];
         move |target_id: String| {
             spawn(async move {
                 let Some(chat) = chat_id() else { return };
+                let leaf = branches::leaf_descendant(&history(), &target_id);
                 let _ = api::api_post(
                     &format!("/api/v1/chats/{chat}"),
-                    &json!({"chat": {"history": {"currentId": target_id}}}),
+                    &json!({"chat": {"history": {"currentId": leaf}}}),
                 )
                 .await;
                 generation_done_nonce += 1;

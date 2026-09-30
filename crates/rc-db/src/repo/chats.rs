@@ -469,8 +469,22 @@ pub async fn update_chat_title_by_id(
     let Some(row) = chat::Entity::find_by_id(id).one(db).await? else {
         return Ok(None);
     };
+    // open-webui keeps column and blob in sync here
+    // (`chat = {**chat, 'title': clean_title}`); updating the column alone
+    // would let the next update_chat_by_id re-derive the STALE blob title
+    // over the generated one.
+    let clean = history::clean_null_bytes(&serde_json::json!(title));
+    let clean_title = clean.as_str().unwrap_or(title).to_string();
+    let mut blob = row.chat.clone().unwrap_or_else(|| serde_json::json!({}));
+    if let Some(obj) = blob.as_object_mut() {
+        obj.insert(
+            "title".to_string(),
+            serde_json::Value::String(clean_title.clone()),
+        );
+    }
     let mut am: chat::ActiveModel = row.into();
-    am.title = Set(Some(title.to_string()));
+    am.title = Set(Some(clean_title));
+    am.chat = Set(Some(blob));
     Ok(Some(am.update(db).await?))
 }
 

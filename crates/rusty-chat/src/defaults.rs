@@ -249,11 +249,32 @@ pub fn default_config() -> BTreeMap<String, serde_json::Value> {
     );
 
     // --- backends (M1-4) ---
-    m.insert("ollama.enable".into(), serde_json::json!(false));
-    m.insert("ollama.base_urls".into(), serde_json::json!([]));
-    m.insert("openai.enable".into(), serde_json::json!(false));
-    m.insert("openai.api_base_urls".into(), serde_json::json!([]));
-    m.insert("openai.api_keys".into(), serde_json::json!([]));
+    // env derivation mirrors open-webui: `;`-separated lists from
+    // OLLAMA_BASE_URLS / OPENAI_API_BASE_URLS / OPENAI_API_KEYS.
+    let env_list = |key: &str| -> serde_json::Value {
+        match std::env::var(key) {
+            Ok(value) if !value.trim().is_empty() => {
+                serde_json::json!(value.split(';').map(str::trim).collect::<Vec<_>>())
+            }
+            _ => serde_json::json!([]),
+        }
+    };
+    let env_bool = |key: &str, default: bool| -> serde_json::Value {
+        serde_json::json!(
+            std::env::var(key)
+                .map(|v| v.to_lowercase() == "true")
+                .unwrap_or(default)
+        )
+    };
+    // open-webui defaults both backends ON
+    m.insert("ollama.enable".into(), env_bool("ENABLE_OLLAMA_API", true));
+    m.insert("ollama.base_urls".into(), env_list("OLLAMA_BASE_URLS"));
+    m.insert("openai.enable".into(), env_bool("ENABLE_OPENAI_API", true));
+    m.insert(
+        "openai.api_base_urls".into(),
+        env_list("OPENAI_API_BASE_URLS"),
+    );
+    m.insert("openai.api_keys".into(), env_list("OPENAI_API_KEYS"));
     m.insert("openai.api_configs".into(), serde_json::json!([]));
     m.insert("direct.enable".into(), serde_json::json!(false));
 

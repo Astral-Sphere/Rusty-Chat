@@ -35,7 +35,11 @@ impl Settings {
         let secret_key = load_secret_key(&data_dir)?;
         let database_url = match std::env::var("DATABASE_URL") {
             Ok(url) => url.replacen("postgres://", "postgresql://", 1),
-            Err(_) => format!("sqlite:///{}/webui.db", data_dir.display()),
+            Err(_) => {
+                // SQLite does not create the file on connect (M0 pitfall);
+                // open-webui's sqlalchemy does, so mirror that with mode=rwc.
+                format!("sqlite:///{}/webui.db?mode=rwc", data_dir.display())
+            }
         };
 
         Ok(Self {

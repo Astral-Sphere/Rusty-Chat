@@ -49,9 +49,16 @@ pg-up:
 pg-down:
     podman stop rc-pg-fixture
 
-# Build the Dioxus frontend (wasm) into web/dist
+# Build the Dioxus frontend (wasm) and copy the bundle into web/dist
 web-build: web-css
     cd web && dx build --release
+    rm -rf web/dist
+    mkdir -p web/dist
+    cp -r web/target/dx/rusty-chat-web/release/web/public/. web/dist/
+
+# Single-binary release build: frontend embedded via rust-embed
+web-release: web-build
+    cargo build --release -p rusty-chat --features embed-frontend
 
 # Regenerate web/assets/tailwind.css (Tailwind v4 standalone CLI, no Node).
 # The generated file is gitignored — dx build / bare cargo builds in web/

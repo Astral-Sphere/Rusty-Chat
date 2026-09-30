@@ -63,7 +63,6 @@ pub async fn render_mermaid_blocks() {
 
 #[cfg(test)]
 mod tests {
-    
 
     #[test]
     fn flowchart_renders_svg() {
