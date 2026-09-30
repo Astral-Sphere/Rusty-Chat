@@ -4,15 +4,22 @@
 //!
 //! 覆盖矩阵：
 //! ✅ users：insert 默认值/非法头像回退、按 id/email(大小写不敏感)/api_key 查询、
-//!   patch 更新 + updated_at 前移、计数、删除（api_key 级联）
+//!   patch 更新 + updated_at 前移、计数、删除（api_key 级联——见
+//!   users_admin_flow 的显式级联断言）、get_users 过滤/排序/分页、
+//!   UserPatch 全字段、空 api key 短路
 //! ✅ auths：signup 建 auth+user、重复 email 拒绝、authenticate 正确/错误密码/
-//!   未知邮箱（仍烧 placeholder 哈希）/inactive 账号、改密、改邮箱同步 user、
-//!   api key 生命周期（create/get/touch/delete）
-//! ✅ chats：insert 默认标题/dual-write chat_message、get+读时修复、update
-//!   顶层合并+history 合并（旧写者不丢消息）、标题/标签更新、pin/archive 切换、
-//!   列表过滤（internal 排除/文件夹/pinned/archived）、搜索、分享（share→
-//!   快照→refresh→unshare→delete 清行）、消息 upsert（blob+行）、消息删除、
-//!   删除聊天（行+快照清理）、last_read_at
+//!   未知邮箱（仍烧 placeholder 哈希）/inactive 账号/password 为 NULL 的行、
+//!   改密、改邮箱同步 user（含 ghost → false）、api key 生命周期（create/
+//!   get/touch/delete）+ 重复 key 冲突 + 未知 key touch no-op
+//! ✅ chats：insert 默认标题/dual-write、get+读时修复、update 顶层合并+history
+//!   合并（旧写者不丢消息）、标题/标签更新、pin/archive 切换、列表过滤、搜索、
+//!   分享、消息 upsert（blob+行）、消息删除、删除聊天、last_read_at
+//! ✅ timer_at 是纳秒而同行 created_at 是秒（COMPATIBILITY §2 头号高危点）
+//! ✅ repair_chat_current_id：bad-leaf → 最新时间戳叶子；contextSummary →
+//!   走到末代叶子；读时 sanitize（NUL 清洗）落库回写
+//! ✅ chat_message：created_at ← blob timestamp、PATCH 路径（snake/camel
+//!   交替键、done 缺省 true）、legacy 裸 id 删除
+//! ✅ tags：slug 规则、重复插入 → None；shared_chats 边界
 //! ✅ config 引擎：seed 只插缺失、upsert 更新+插入、get_or、all
 //! ✅ 双方言：SQLite 必跑；RC_TEST_PG_URL 门控 PG（同断言同语义）
 //! ⛔ 刻意不覆盖：并发写竞争（由单连接测试模型 + PG for update 语义另行覆盖，M5）
@@ -876,6 +883,450 @@ async fn chat_last_read_flow(db: &DatabaseConnection) {
     );
 }
 
+// ---------- hardening flows ----------
+
+/// `chat.timer_at` is epoch NANOS while `created_at` on the SAME row is
+/// epoch SECS (COMPATIBILITY §2 — the single most dangerous unit mix).
+async fn chats_timer_at_flow(db: &DatabaseConnection) {
+    seed_user(db, "owner").await;
+    let now_nanos = rc_core::timestamp::Nanos::now().as_i64();
+    let chat = chats::insert_new_chat(
+        db,
+        NewChatParams {
+            id: "t1",
+            user_id: "owner",
+            chat: &blob("Timed"),
+            folder_id: None,
+            variables: None,
+            internal_meta: None,
+            timer_at: Some(now_nanos),
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        chat.timer_at.unwrap() >= 1_000_000_000_000_000_000,
+        "timer_at must be nanoseconds, got {}",
+        chat.timer_at.unwrap()
+    );
+    assert!(
+        chat.created_at.unwrap() <= 4_000_000_000,
+        "created_at must be seconds, got {}",
+        chat.created_at.unwrap()
+    );
+    let reread = chats::get_chat_by_id(db, "t1").await.unwrap().unwrap();
+    assert_eq!(reread.timer_at, Some(now_nanos), "survives a round-trip");
+}
+
+/// Raw row insert helper (bypasses insert_new_chat's read/repair hygiene).
+async fn insert_raw_chat(db: &DatabaseConnection, id: &str, blob: &serde_json::Value) {
+    use rc_db::entity::chat;
+    let am = chat::ActiveModel {
+        id: Set(id.to_string()),
+        user_id: Set(Some("owner".to_string())),
+        title: Set(blob
+            .get("title")
+            .and_then(|t| t.as_str())
+            .map(str::to_string)),
+        chat: Set(Some(blob.clone())),
+        created_at: Set(Some(1)),
+        updated_at: Set(Some(1)),
+        share_id: Set(None),
+        archived: Set(Some(false)),
+        pinned: Set(Some(false)),
+        meta: Set(Some(json!({}))),
+        variables: Set(Some(json!({}))),
+        folder_id: Set(None),
+        tasks: Set(None),
+        summary: Set(None),
+        current_message_id: Set(None),
+        last_read_at: Set(Some(1)),
+        timer_at: Set(None),
+    };
+    use sea_orm::ActiveModelTrait as _;
+    am.insert(db).await.unwrap();
+}
+
+/// repair_chat_current_id branches + read-time sanitize write-back.
+async fn chat_repair_flow(db: &DatabaseConnection) {
+    seed_user(db, "owner").await;
+
+    // bad leaf: current node has output-role assistant, null parent and
+    // timestamp 0 with more messages present → repair to latest-timestamp leaf
+    let bad_leaf = json!({
+        "title": "bad leaf",
+        "history": {
+            "currentId": "bad",
+            "messages": {
+                "m0": {"id": "m0", "parentId": null, "childrenIds": [], "role": "user", "content": "hi", "timestamp": 10},
+                "bad": {"id": "bad", "parentId": null, "childrenIds": [], "role": "assistant", "content": "", "timestamp": 0,
+                        "output": [{"type": "message", "role": "assistant"}]}
+            }
+        }
+    });
+    insert_raw_chat(db, "br1", &bad_leaf).await;
+    let repaired = chats::get_chat_by_id(db, "br1").await.unwrap().unwrap();
+    let history = repaired.chat.as_ref().unwrap()["history"]
+        .as_object()
+        .unwrap();
+    assert_eq!(
+        history["currentId"],
+        json!("m0"),
+        "bad leaf must repair to the latest-timestamp leaf"
+    );
+    assert_eq!(repaired.current_message_id.as_deref(), Some("m0"));
+
+    // contextSummary on the current node walks to the last descendant
+    let with_summary = json!({
+        "title": "cs",
+        "history": {
+            "currentId": "a1",
+            "messages": {
+                "u1": {"id": "u1", "parentId": null, "childrenIds": ["a1"], "role": "user", "content": "q", "timestamp": 1},
+                "a1": {"id": "a1", "parentId": "u1", "childrenIds": ["a2"], "role": "assistant", "content": "", "timestamp": 2, "contextSummary": "s"},
+                "a2": {"id": "a2", "parentId": "a1", "childrenIds": [], "role": "assistant", "content": "final", "timestamp": 3}
+            }
+        }
+    });
+    insert_raw_chat(db, "br2", &with_summary).await;
+    let repaired = chats::get_chat_by_id(db, "br2").await.unwrap().unwrap();
+    let history = repaired.chat.as_ref().unwrap()["history"]
+        .as_object()
+        .unwrap();
+    assert_eq!(
+        history["currentId"],
+        json!("a2"),
+        "contextSummary current must walk to the last descendant"
+    );
+    assert_eq!(repaired.current_message_id.as_deref(), Some("a2"));
+
+    // read-time sanitize PERSISTS: NUL bytes are scrubbed in the stored row,
+    // not just the response (OWU `_sanitize_chat_row` semantics)
+    let dirty = json!({
+        "title": "t\u{0}x",
+        "history": {"currentId": "m", "messages": {
+            "m": {"id": "m", "parentId": null, "childrenIds": [], "role": "user", "content": "a\u{0}b", "timestamp": 1}
+        }}
+    });
+    insert_raw_chat(db, "br3", &dirty).await;
+    let cleaned = chats::get_chat_by_id(db, "br3").await.unwrap().unwrap();
+    assert_eq!(cleaned.title.as_deref(), Some("tx"));
+    use rc_db::entity::chat;
+    use sea_orm::EntityTrait as _;
+    let raw = chat::Entity::find_by_id("br3")
+        .one(db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(raw.title.as_deref(), Some("tx"), "write-back to the row");
+    let raw_blob = raw.chat.unwrap().to_string();
+    assert!(!raw_blob.contains("\\u0000"), "blob scrubbed: {raw_blob}");
+}
+
+/// chat_message insert/patch: created_at ← blob timestamp, camelCase alt
+/// keys, done default, legacy bare-id delete.
+async fn chat_message_patch_flow(db: &DatabaseConnection) {
+    seed_user(db, "owner").await;
+    // chat_message.chat_id has an FK to chat — create the parent row first
+    chats::insert_new_chat(
+        db,
+        NewChatParams {
+            id: "pc1",
+            user_id: "owner",
+            chat: &json!({"title": "patch", "history": {"messages": {}}}),
+            folder_id: None,
+            variables: None,
+            internal_meta: None,
+            timer_at: None,
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let m = json!({
+        "id": "m0", "parentId": null, "childrenIds": [],
+        "role": "user", "content": "hello", "timestamp": 1_757_890_000,
+        "model_id": "llama3", "done": false
+    });
+    let row = chat_messages::upsert_message(db, "m0", "pc1", "owner", &m)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.id, "pc1-m0");
+    assert_eq!(
+        row.created_at.unwrap(),
+        1_757_890_000,
+        "created_at derives from the blob timestamp (SECS)"
+    );
+    assert_eq!(row.done, Some(false));
+    assert_eq!(row.model_id.as_deref(), Some("llama3"));
+
+    // PATCH keyed on the composite id: camelCase alternates must map
+    // (model→model_id, statusHistory→status_history,
+    // contextSummary→context_summary); done missing → true
+    let patch = json!({
+        "role": "assistant",
+        "content": "patched",
+        "model": "gpt-x",
+        "statusHistory": [{"done": true}],
+        "contextSummary": "cs",
+        "parentId": null
+    });
+    let patched = chat_messages::upsert_message(db, "m0", "pc1", "owner", &patch)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(patched.content, Some(json!("patched")));
+    assert_eq!(patched.model_id.as_deref(), Some("gpt-x"));
+    assert_eq!(patched.status_history, Some(json!([{"done": true}])));
+    assert_eq!(patched.context_summary.as_deref(), Some("cs"));
+    assert_eq!(patched.done, Some(true), "done defaults to true on patch");
+    assert_eq!(
+        patched.created_at.unwrap(),
+        1_757_890_000,
+        "patch must not move created_at"
+    );
+    assert!(patched.updated_at.unwrap() >= row.updated_at.unwrap());
+
+    // legacy bare-id matching on blob-id delete
+    assert!(
+        chat_messages::delete_messages_by_blob_ids(db, "pc1", &["m0".to_string()])
+            .await
+            .unwrap()
+    );
+    assert!(
+        chat_messages::get_message_by_id(db, "pc1-m0")
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+/// get_users query/order/pagination + full UserPatch + api_key cascade on
+/// user delete + empty-key short circuit.
+async fn users_admin_flow(db: &DatabaseConnection) {
+    seed_user(db, "a1").await;
+    for (id, name) in [("b2", "Beta"), ("c3", "gamma")] {
+        users::insert_new_user(
+            db,
+            users::NewUserParams {
+                id,
+                name,
+                email: &format!("{id}@x.com"),
+                profile_image_url: None,
+                role: Some("user"),
+                username: None,
+                oauth: None,
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    }
+
+    let (all, total) = users::get_users(db, None, None, None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(all.len(), 3);
+    assert_eq!(total, 3);
+
+    // query matches name OR email, case-insensitively
+    let (hits, total) = users::get_users(db, Some("beta"), None, None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(total, 1);
+    assert_eq!(hits[0].id, "b2");
+    let (hits, _) = users::get_users(db, Some("C3@X.COM"), None, None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+
+    // order by name asc/desc
+    let (asc, _) = users::get_users(db, None, Some("name"), Some("asc"), None, None)
+        .await
+        .unwrap();
+    let names: Vec<String> = asc.iter().map(|u| u.name.clone()).collect();
+    let mut sorted = names.clone();
+    sorted.sort();
+    assert_eq!(names, sorted);
+    let (desc, _) = users::get_users(db, None, Some("name"), Some("desc"), None, None)
+        .await
+        .unwrap();
+    let desc_names: Vec<String> = desc.iter().map(|u| u.name.clone()).collect();
+    let mut rsorted = names.clone();
+    rsorted.reverse();
+    assert_eq!(desc_names, rsorted);
+
+    // skip/limit with total unaffected
+    let (page, total) = users::get_users(db, None, Some("name"), Some("asc"), Some(1), Some(1))
+        .await
+        .unwrap();
+    assert_eq!(total, 3);
+    assert_eq!(page.len(), 1);
+    assert_eq!(page[0].id, asc[1].id);
+
+    // every UserPatch field persists
+    let patched = users::update_user_by_id(
+        db,
+        "a1",
+        users::UserPatch {
+            role: Some("admin".into()),
+            name: Some("Full".into()),
+            email: Some("full@x.com".into()),
+            profile_image_url: Some("https://x.com/a.png".into()),
+            bio: Some("bio".into()),
+            gender: Some("other".into()),
+            timezone: Some("Asia/Shanghai".into()),
+            settings: Some(json!({"theme": "dark"})),
+            variables: Some(json!({"k": "v"})),
+            info: Some(json!({"p": 1})),
+            last_active_at: Some(rc_core::timestamp::Secs(1_757_890_000)),
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(patched.role.as_deref(), Some("admin"));
+    assert_eq!(patched.email.as_deref(), Some("full@x.com"));
+    assert_eq!(patched.timezone.as_deref(), Some("Asia/Shanghai"));
+    assert_eq!(patched.settings, Some(json!({"theme": "dark"})));
+    let reread = users::get_user_by_id(db, "a1").await.unwrap().unwrap();
+    assert_eq!(reread.bio.as_deref(), Some("bio"));
+    assert_eq!(reread.last_active_at, Some(1_757_890_000));
+
+    // deleting a user removes their api key (FK cascade)
+    auths::api_keys::create(db, "b2", "sk-cascade1")
+        .await
+        .unwrap();
+    assert!(
+        users::get_user_by_api_key(db, "sk-cascade1")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(users::delete_user_by_id(db, "b2").await.unwrap());
+    assert!(
+        users::get_user_by_api_key(db, "sk-cascade1")
+            .await
+            .unwrap()
+            .is_none(),
+        "api_key must cascade on user delete"
+    );
+
+    // empty key short-circuits before hitting the DB
+    assert!(users::get_user_by_api_key(db, "").await.unwrap().is_none());
+}
+
+/// authenticate with a NULL password hash; update_email ghost; api-key
+/// duplicate/unknown-key edges.
+async fn auths_edge_flow(db: &DatabaseConnection) {
+    use rc_db::entity::auth;
+    use sea_orm::EntityTrait as _;
+    let created = auths::insert_new_auth(
+        db,
+        SignupParams {
+            email: "NullPw@x.com",
+            password_hash: "$2b$12$hash",
+            name: "NP",
+            profile_image_url: None,
+            role: Some("user"),
+            oauth: None,
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    // NULL password row: nothing to verify → None
+    let row = auth::Entity::find_by_id(&created.id)
+        .one(db)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut am: auth::ActiveModel = row.into();
+    am.password = Set(None);
+    am.update(db).await.unwrap();
+    assert!(
+        auths::authenticate_user(db, "nullpw@x.com", "pw", &YesVerify, "$fake")
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // email update on a missing user → false
+    assert!(
+        !auths::update_email_by_id(db, "ghost", "x@y.com")
+            .await
+            .unwrap()
+    );
+
+    // duplicate api key violates the unique constraint
+    auths::api_keys::create(db, &created.id, "sk-dupkey")
+        .await
+        .unwrap();
+    assert!(
+        auths::api_keys::create(db, "other-user", "sk-dupkey")
+            .await
+            .is_err()
+    );
+    // touching an unknown key is a no-op
+    auths::api_keys::touch_last_used(db, "sk-unknown")
+        .await
+        .unwrap();
+}
+
+/// tag slug rules + duplicate insert; shared_chats edge paths.
+async fn tags_shared_edges_flow(db: &DatabaseConnection) {
+    seed_user(db, "owner").await;
+    assert_eq!(tags::tag_id_from_name("Work Stuff"), "work_stuff");
+    assert_eq!(tags::tag_id_from_name("UPPER"), "upper");
+    assert_eq!(tags::tag_id_from_name("a  b"), "a__b");
+    assert_eq!(tags::tag_id_from_name("中文 Tag"), "中文_tag");
+
+    chats::insert_new_chat(
+        db,
+        NewChatParams {
+            id: "tagc",
+            user_id: "owner",
+            chat: &blob("Tagged"),
+            folder_id: None,
+            variables: None,
+            internal_meta: None,
+            timer_at: None,
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    chats::update_chat_tags_by_id(db, "tagc", &["Solo"], "owner")
+        .await
+        .unwrap();
+    // the row already exists → plain INSERT hits the composite-PK UNIQUE
+    // constraint (pinned: the RecordNotInserted arm only fires for
+    // ON CONFLICT DO NOTHING, which this call does not use)
+    assert!(tags::insert_new_tag(db, "Solo", "owner").await.is_err());
+
+    // shared_chats edges
+    assert!(
+        shared_chats::get_chat_id_by_share_id(db, "nope")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(!shared_chats::delete_by_id(db, "nope").await.unwrap());
+    assert!(shared_chats::update(db, "nope").await.unwrap().is_none());
+    let share = chats::share_chat(db, "tagc").await.unwrap().unwrap();
+    let sid = share.share_id.unwrap();
+    assert_eq!(
+        shared_chats::get_chat_id_by_share_id(db, &sid)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("tagc")
+    );
+    assert!(shared_chats::delete_by_id(db, &sid).await.unwrap());
+}
+
 // ---------- config ----------
 
 async fn config_engine_flow(db: &DatabaseConnection) {
@@ -981,4 +1432,34 @@ async fn chat_last_read_flow_both_dialects() {
 #[tokio::test]
 async fn config_engine_flow_both_dialects() {
     everywhere!(config_engine_flow);
+}
+
+#[tokio::test]
+async fn chats_timer_at_flow_both_dialects() {
+    everywhere!(chats_timer_at_flow);
+}
+
+#[tokio::test]
+async fn chat_repair_flow_both_dialects() {
+    everywhere!(chat_repair_flow);
+}
+
+#[tokio::test]
+async fn chat_message_patch_flow_both_dialects() {
+    everywhere!(chat_message_patch_flow);
+}
+
+#[tokio::test]
+async fn users_admin_flow_both_dialects() {
+    everywhere!(users_admin_flow);
+}
+
+#[tokio::test]
+async fn auths_edge_flow_both_dialects() {
+    everywhere!(auths_edge_flow);
+}
+
+#[tokio::test]
+async fn tags_shared_edges_flow_both_dialects() {
+    everywhere!(tags_shared_edges_flow);
 }

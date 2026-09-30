@@ -749,6 +749,42 @@ mod tests {
     }
 
     #[test]
+    fn delete_root_rewalks_current_from_remaining_roots() {
+        // deleting the ROOT of the active path: root + direct child go away,
+        // currentId rewalks the last-child chain from the remaining roots
+        let mut blob = json!({
+            "currentId": "a1",
+            "messages": {
+                "u1": {"id": "u1", "parentId": null, "childrenIds": ["a1"], "role": "user", "content": "q", "timestamp": 1},
+                "a1": {"id": "a1", "parentId": "u1", "childrenIds": [], "role": "assistant", "content": "r", "timestamp": 2},
+                "u2": {"id": "u2", "parentId": null, "childrenIds": [], "role": "user", "content": "q2", "timestamp": 3}
+            }
+        });
+        let deleted = delete_message_from_history(&mut blob, "u1");
+        assert_eq!(deleted, vec!["u1".to_string(), "a1".to_string()]);
+        let messages = blob["messages"].as_object().unwrap();
+        assert!(!messages.contains_key("u1") && !messages.contains_key("a1"));
+        assert_eq!(blob["currentId"], json!("u2"), "rewalked to the only root");
+    }
+
+    #[test]
+    fn delete_skips_non_object_entry() {
+        let mut history = json!({
+            "currentId": null,
+            "messages": {"bad": "not-an-object"}
+        });
+        assert!(delete_message_from_history(&mut history, "bad").is_empty());
+        // the malformed entry stays (caller decides what to do with it)
+        assert!(history["messages"].get("bad").is_some());
+    }
+
+    #[test]
+    fn merge_both_none_yields_empty_history() {
+        let merged = merge_history(None, None);
+        assert_eq!(merged, json!({"messages": {}, "currentId": null}));
+    }
+
+    #[test]
     fn repair_adds_missing_child_links() {
         // blob arrived without childrenIds — repair fills them
         let mut chat = json!({

@@ -3,6 +3,14 @@
 //! These are the M0 gate for database compatibility: if we can bootstrap a
 //! fresh database and then read/write it with plain SQL, and open-webui's own
 //! fixture opens as `Compatible`, the foundation is sound.
+//!
+//! 覆盖矩阵：
+//! ✅ SQLite（必跑）：Fresh→Compatible、43 表计数、幂等 bootstrap、
+//!   WrongRevision 拒绝（ca81bd47c050）、LegacyUnstamped 拒绝、
+//!   真实 open-webui fixture（docs/fixtures/webui-head.db）可打开可写
+//! ✅ Postgres（RC_TEST_PG_URL 门控，未设时打印 skip）：Fresh→Compatible、
+//!   43 表计数、WrongRevision/LegacyUnstamped 拒绝路径
+//! ⛔ 刻意不覆盖：部分迁移的中间版本逐个枚举（只锚定 head 与两个拒绝态）
 
 use rc_core::Error;
 use rc_db::bootstrap::{DatabaseState, Dialect, bootstrap, inspect_database};
@@ -230,4 +238,92 @@ async fn postgres_bootstrap_matches_ground_truth() {
         count, 43,
         "postgres table count diverges from open-webui head"
     );
+}
+
+/// PG-side WrongRevision refusal (the SQLite twin above only covered one
+/// dialect; the inspect logic branches on information_schema for PG).
+#[tokio::test]
+async fn postgres_refuses_wrong_revision() {
+    let Some(mut conn) = pg_scratch_rc_db_pg_wrongrev().await else {
+        return;
+    };
+    bootstrap(&mut conn, Dialect::Postgres).await.unwrap();
+    sqlx::query("UPDATE alembic_version SET version_num = 'ca81bd47c050'")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    match inspect_database(&mut conn).await.unwrap() {
+        DatabaseState::WrongRevision { found } => assert_eq!(found, "ca81bd47c050"),
+        other => panic!("expected WrongRevision, got {other:?}"),
+    }
+    let err = bootstrap(&mut conn, Dialect::Postgres).await.unwrap_err();
+    assert!(matches!(err, Error::DatabaseIncompatible(_)));
+}
+
+/// PG-side LegacyUnstamped refusal (pre-existing tables, no alembic stamp).
+#[tokio::test]
+async fn postgres_refuses_legacy_unstamped_database() {
+    let Some(mut conn) = pg_scratch_rc_db_pg_legacy().await else {
+        return;
+    };
+    sqlx::raw_sql(
+        "CREATE TABLE user (id VARCHAR PRIMARY KEY, email VARCHAR); \
+         CREATE TABLE auth (id VARCHAR PRIMARY KEY, password TEXT);",
+    )
+    .execute(&mut *conn)
+    .await
+    .unwrap();
+    assert_eq!(
+        inspect_database(&mut conn).await.unwrap(),
+        DatabaseState::LegacyUnstamped
+    );
+    let err = bootstrap(&mut conn, Dialect::Postgres).await.unwrap_err();
+    assert!(matches!(err, Error::DatabaseIncompatible(_)));
+}
+
+/// Scratch-database helper. The database name is baked into the generated
+/// function name (sqlx 0.9 audits dynamic raw_sql strings; a literal name
+/// per call site keeps every statement static). Returns None — after
+/// printing a skip line — when RC_TEST_PG_URL is unset.
+async fn pg_scratch_rc_db_pg_wrongrev() -> Option<sqlx::pool::PoolConnection<sqlx::Any>> {
+    pg_scratch_impl("rc_db_pg_wrongrev").await
+}
+
+async fn pg_scratch_rc_db_pg_legacy() -> Option<sqlx::pool::PoolConnection<sqlx::Any>> {
+    pg_scratch_impl("rc_db_pg_legacy").await
+}
+
+async fn pg_scratch_impl(name: &'static str) -> Option<sqlx::pool::PoolConnection<sqlx::Any>> {
+    let Ok(url) = std::env::var("RC_TEST_PG_URL") else {
+        eprintln!("skipping: RC_TEST_PG_URL not set");
+        return None;
+    };
+    let trimmed = url.trim_end_matches('/');
+    let cut = trimmed.rfind('/').filter(|i| !trimmed[..*i].ends_with(':'));
+    let base = match cut {
+        Some(i) => &trimmed[..i],
+        None => trimmed,
+    };
+    let (pool, mut admin) = any_conn(&format!("{base}/postgres")).await;
+    // Only the database NAME is interpolated, and it is a compile-time
+    // constant of this test file — audited safe.
+    let drop_sql = match name {
+        "rc_db_pg_wrongrev" => "DROP DATABASE IF EXISTS rc_db_pg_wrongrev WITH (FORCE);",
+        "rc_db_pg_legacy" => "DROP DATABASE IF EXISTS rc_db_pg_legacy WITH (FORCE);",
+        _ => unreachable!("unknown scratch db"),
+    };
+    let create_sql = match name {
+        "rc_db_pg_wrongrev" => "CREATE DATABASE rc_db_pg_wrongrev;",
+        "rc_db_pg_legacy" => "CREATE DATABASE rc_db_pg_legacy;",
+        _ => unreachable!("unknown scratch db"),
+    };
+    sqlx::raw_sql(drop_sql).execute(&mut *admin).await.unwrap();
+    sqlx::raw_sql(create_sql)
+        .execute(&mut *admin)
+        .await
+        .unwrap();
+    drop(admin);
+    drop(pool);
+    let (_p, conn) = any_conn(&format!("{base}/{name}")).await;
+    Some(conn)
 }
