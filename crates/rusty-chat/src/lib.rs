@@ -69,6 +69,14 @@ pub fn build_router(app_state: AppState, frontend_dist: &std::path::Path) -> axu
             axum::routing::post(routes::tasks::generate_title),
         )
         .route(
+            "/api/v1/utils/highlight",
+            axum::routing::post(routes::utils::highlight),
+        )
+        .route(
+            "/api/v1/utils/highlight/languages",
+            axum::routing::get(routes::utils::languages),
+        )
+        .route(
             "/api/v1/chats/new",
             axum::routing::post(routes::chats::create_new_chat),
         )

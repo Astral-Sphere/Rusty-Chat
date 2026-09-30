@@ -31,6 +31,7 @@ sqlx.workspace = true
 rc-llm = { version = "0.1.0", path = "../rc-llm" }
 reqwest = { version = "0.13.5", features = ["json", "stream"] }
 rc-realtime = { version = "0.1.0", path = "../rc-realtime" }
+rc-highlight = { version = "0.1.0", path = "../rc-highlight" }
 
 [dev-dependencies]
 http = "1.5.0"

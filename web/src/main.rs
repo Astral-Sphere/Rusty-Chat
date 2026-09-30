@@ -7,6 +7,7 @@
 //! - one app-level WebSocket; events filter by chat_id.
 
 mod api;
+mod highlight;
 mod render;
 
 use dioxus::prelude::*;
@@ -458,6 +459,11 @@ fn message_item(message: ChatMessageState) -> Element {
     // component's lifetime, so a plain once-computed memo is enough.
     let content = message.content.clone();
     let rendered = use_memo(move || render::render_markdown(&content));
+    // after a done render, backfill syntax highlighting into code fences
+    use_effect(move || {
+        rendered();
+        spawn(highlight::backfill_code_blocks());
+    });
     let align = if message.role == "user" {
         "ml-auto max-w-xl"
     } else {

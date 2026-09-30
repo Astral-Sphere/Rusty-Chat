@@ -215,16 +215,22 @@ pub async fn run_background_title(
         .get("content")
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
-        .or_else(|| response_message.get("reasoning_content").and_then(Value::as_str))
+        .or_else(|| {
+            response_message
+                .get("reasoning_content")
+                .and_then(Value::as_str)
+        })
         .unwrap_or_default();
 
-    let first_message_content = messages
-        .first()
-        .and_then(tasks::message_content);
+    let first_message_content = messages.first().and_then(tasks::message_content);
     let user_message = tasks::last_user_message(&messages)
         .as_deref()
         .map(tasks::truncate_title_fallback);
-    let title = tasks::extract_title(title_source, first_message_content.as_deref(), user_message.as_deref());
+    let title = tasks::extract_title(
+        title_source,
+        first_message_content.as_deref(),
+        user_message.as_deref(),
+    );
     if title.is_empty() {
         return;
     }

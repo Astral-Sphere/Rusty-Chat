@@ -163,15 +163,23 @@ fn replace_messages_variable(template: &str, messages: &[Value]) -> String {
             messages.iter().take(n).cloned().collect()
         } else if let Some(n) = caps.name("end") {
             let n: usize = n.as_str().parse().unwrap_or(0);
-            messages.iter().skip(messages.len().saturating_sub(n)).cloned().collect()
+            messages
+                .iter()
+                .skip(messages.len().saturating_sub(n))
+                .cloned()
+                .collect()
         } else if let Some(n) = caps.name("mid") {
             let n: usize = n.as_str().parse().unwrap_or(0);
             if messages.len() <= n {
                 messages.to_vec()
             } else {
                 let half = n / 2;
-                let tail = if n % 2 == 0 { half } else { half + 1 };
-                messages.iter().take(half).cloned().collect::<Vec<_>>()
+                let tail = if n.is_multiple_of(2) { half } else { half + 1 };
+                messages
+                    .iter()
+                    .take(half)
+                    .cloned()
+                    .collect::<Vec<_>>()
                     .into_iter()
                     .chain(messages.iter().skip(messages.len() - tail).cloned())
                     .collect()
@@ -188,8 +196,11 @@ fn replace_messages_variable(template: &str, messages: &[Value]) -> String {
         selected
             .iter()
             .map(|m| {
-                let role =
-                    m.get("role").and_then(Value::as_str).unwrap_or("").to_uppercase();
+                let role = m
+                    .get("role")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_uppercase();
                 let content = message_content(m);
                 let content = match &filter {
                     Some(f) => apply_filter(content, f),
@@ -280,8 +291,14 @@ mod tests {
     #[test]
     fn prompt_start_end_middletruncate() {
         let long = "0123456789abcdef";
-        assert_eq!(replace_prompt_variable("{{prompt:start:4}}", Some(long)), "0123");
-        assert_eq!(replace_prompt_variable("{{prompt:end:4}}", Some(long)), "cdef");
+        assert_eq!(
+            replace_prompt_variable("{{prompt:start:4}}", Some(long)),
+            "0123"
+        );
+        assert_eq!(
+            replace_prompt_variable("{{prompt:end:4}}", Some(long)),
+            "cdef"
+        );
         // middletruncate: head = ceil(n/2), tail = n/2
         assert_eq!(
             replace_prompt_variable("{{prompt:middletruncate:8}}", Some(long)),
@@ -303,7 +320,10 @@ mod tests {
     #[test]
     fn messages_end_two_matches_default_template() {
         let out = render_title_template(DEFAULT_TITLE_GENERATION_PROMPT_TEMPLATE, &msgs());
-        assert!(out.contains("USER: What is the capital of France?"), "{out}");
+        assert!(
+            out.contains("USER: What is the capital of France?"),
+            "{out}"
+        );
         assert!(out.contains("ASSISTANT: Paris."), "{out}");
         assert!(!out.contains("{{MESSAGES"), "{out}");
     }
@@ -371,11 +391,7 @@ mod tests {
 
     #[test]
     fn extract_title_missing_key_falls_back_to_user_message() {
-        let out = extract_title(
-            "{\"reason\": \"none\"}",
-            Some("first"),
-            Some("user asked"),
-        );
+        let out = extract_title("{\"reason\": \"none\"}", Some("first"), Some("user asked"));
         assert_eq!(out, "user asked");
     }
 

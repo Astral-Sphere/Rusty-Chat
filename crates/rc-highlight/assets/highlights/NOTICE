@@ -1,0 +1,35 @@
+crates/rc-highlight/assets/highlights/*.scm
+============================================
+
+Tree-sitter highlight query files vendored from the Zed editor
+(https://github.com/zed-industries/zed), directory
+crates/grammars/src/<language>/highlights.scm.
+
+Copyright 2022 - 2025 Zed Industries, Inc.
+Licensed under the Apache License, Version 2.0 (the "LICENSE-APACHE" at the
+vendored zed/ repository root); a copy of the license text is reproduced in
+zed/LICENSE-APACHE. These query files are data assets consumed at runtime —
+per DECISIONS D-013 they are vendored deliberately and are not part of this
+repository's source code.
+
+Regeneration: re-copy from the pinned zed reference tree. The vendored zed
+snapshot is the one at commit 70351f5's date (2026-09) in this repository.
+
+Local patches (the crates.io grammar releases lag zed's forks):
+- cpp.scm: dropped C++20 module patterns and the "export"/"import"/"module"
+  keyword tokens (absent from tree-sitter-cpp 0.23.4).
+- javascript.scm: dropped zed-fork TypeScript-flavored patterns
+  (type_arguments, nested_type_identifier, required/optional_parameter,
+  type_identifier, …) and TS-only keyword tokens.
+
+Not vendored:
+- markdown: zed's highlights.scm targets zed's markdown grammar fork and is
+  incompatible with tree-sitter-markdown 0.7.1 (no `pipe_table`, different
+  heading structure). Revisit with a markdown grammar upgrade.
+- html: zed ships no html grammar; the endpoint uses the tree-sitter-html
+  crate's own bundled HIGHLIGHTS_QUERY directly (no file here).
+
+html.scm is NOT from zed (zed ships no html grammar); it is the
+tree-sitter-html crate's own bundled HIGHLIGHTS_QUERY (MIT, tree-sitter
+grammars upstream), written out here so every language loads through the
+same include_str! path.

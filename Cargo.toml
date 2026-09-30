@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/rc-core",
+        "crates/rc-highlight",
     "crates/rc-db",
     "crates/rc-auth",
     "crates/rc-llm",

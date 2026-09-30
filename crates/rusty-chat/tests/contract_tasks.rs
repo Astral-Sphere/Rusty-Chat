@@ -189,7 +189,9 @@ async fn title_endpoint_contract() {
     let body: Value = resp.json().await.unwrap();
     assert_eq!(
         body["detail"],
-        json!("No model specified for title generation. Please ensure a model is selected for this chat.")
+        json!(
+            "No model specified for title generation. Please ensure a model is selected for this chat."
+        )
     );
 
     // unknown model → 404
@@ -228,7 +230,10 @@ async fn title_endpoint_contract() {
     let body: Value = resp.json().await.unwrap();
     assert_eq!(body["object"], json!("chat.completion"));
     assert_eq!(body["model"], json!("llama3:8b"));
-    assert_eq!(body["choices"][0]["message"]["content"], json!(r#"{"title": "Greetings"}"#));
+    assert_eq!(
+        body["choices"][0]["message"]["content"],
+        json!(r#"{"title": "Greetings"}"#)
+    );
 
     // template rendering reached the backend
     let captured = capture.lock().await;
@@ -302,9 +307,10 @@ async fn background_title_after_first_round_only() {
     let client = reqwest::Client::new();
     let token = signup_token(&base).await;
 
-    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{}/ws", base.trim_start_matches("http://")))
-        .await
-        .unwrap();
+    let (mut ws, _) =
+        tokio_tungstenite::connect_async(format!("ws://{}/ws", base.trim_start_matches("http://")))
+            .await
+            .unwrap();
     ws.send(tokio_tungstenite::tungstenite::Message::text(
         json!({"token": token}).to_string(),
     ))
@@ -360,7 +366,11 @@ async fn background_title_after_first_round_only() {
         }
     }
     assert!(saw_done, "first round must complete");
-    assert_eq!(title.as_deref(), Some("Greetings"), "chat:title must arrive");
+    assert_eq!(
+        title.as_deref(),
+        Some("Greetings"),
+        "chat:title must arrive"
+    );
 
     // title persisted on the chat row
     let chat = rc_db::repo::chats::get_chat_by_id(&app_state.db, &chat_id)

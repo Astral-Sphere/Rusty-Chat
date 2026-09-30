@@ -108,11 +108,9 @@ pub async fn chat_completion(
     if form.stream == Some(false) {
         return match complete_sync(&app, &model, &stream_form).await {
             Ok(body) => Json(body).into_response(),
-            Err(rc_core::Error::NotFound(detail)) => (
-                StatusCode::NOT_FOUND,
-                Json(json!({"detail": detail})),
-            )
-                .into_response(),
+            Err(rc_core::Error::NotFound(detail)) => {
+                (StatusCode::NOT_FOUND, Json(json!({"detail": detail}))).into_response()
+            }
             Err(e) => (
                 StatusCode::BAD_GATEWAY,
                 Json(json!({"detail": e.to_string()})),
