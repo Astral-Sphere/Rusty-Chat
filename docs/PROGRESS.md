@@ -52,6 +52,13 @@
 5. 分支切换 currentId 落在兄弟消息本身导致回复不可见——补 `leaf_descendant`（open-webui Messages.svelte 的 youngest-child 链语义）。
 - 环境注意：podman 在本会话沙箱内无法启动（newuidmap setuid 缺失）——PG 契约测试需用户在终端跑 `just test-pg`；另 `just` 本机未装，直接用底层命令。
 
+### 分支编辑位置修复（2026-09-30，aa66757，用户报告）
+- **现象**：编辑历史消息后新分支被追加到消息列表底部，而 open-webui 是原位替换。
+- **根因**：显示列表是扁平 Vec，`send`/编辑保存直接 push；open-webui 的显示永远从 `history.currentId` 祖先链重建（`createMessagesList`）。
+- **修复原则（必须遵守）**：**消息顺序的唯一来源是 `build_view(history)` 投影（active_path + 兄弟位置）；任何变更 = 本地 patch history 树（`branches::attach_*`，镜像服务端 upsert）→ 重新投影，绝不直接 push 列表**。
+- `send` 补齐原版 submitPrompt 语义：follow-up `parentId = history.currentId`（此前 null → 每条都是新根）、发给 LLM 的 messages 是完整活跃链（此前只有新消息单条）。
+- **新踩坑**：`std::time::SystemTime::now()` 在 wasm32-unknown-unknown 上 **unimplemented、直接 panic（release 下静默 unreachable trap，杀掉当前 spawn 的 future 但不崩实例）**——前端取时间必须走 `js_sys::Date::now()`（web/src/main.rs `chrono_secs`）。调试手段：window error 事件能捕到 wasm trap（`Uncaught RuntimeError: unreachable`）。
+
 ## M1 状态总结（2026-09-16）
 
 **全部 7 段完成**（ef7744a→e7b37e2 共 9 个提交）：后端 REST 面（auth/chats/models/config）+ 聊天管线（双方言流式 + WS events）+ Dioxus 前端骨架（登录/聊天/流式渲染）全部可用并有契约测试覆盖；84 native 测试 + web wasm 编译零警告。**遗留增强**（不阻塞 M1 验收，见「下一步」）：markdown/KaTeX/高亮渲染管线、标题生成、消息树分支 UI、content search。
