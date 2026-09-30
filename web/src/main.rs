@@ -7,6 +7,7 @@
 //! - one app-level WebSocket; events filter by chat_id.
 
 mod api;
+mod branches;
 mod highlight;
 mod render;
 
@@ -27,6 +28,23 @@ struct ChatMessageState {
     content: String,
     done: bool,
     is_error: bool,
+    // ‹ › branch switcher: 1-based position among siblings (0 when hidden)
+    sibling_index: usize,
+    sibling_count: usize,
+}
+
+impl ChatMessageState {
+    fn plain(id: String, role: &str, content: String, done: bool) -> Self {
+        Self {
+            id,
+            role: role.to_string(),
+            content,
+            done,
+            is_error: false,
+            sibling_index: 0,
+            sibling_count: 0,
+        }
+    }
 }
 
 fn main() {
@@ -255,6 +273,7 @@ fn chat_view(token: String, generation_active: Signal<bool>, list_refresh: Signa
     let models = use_signal(Vec::<String>::new);
     let mut selected_model = use_signal(String::new);
     let messages = use_signal(Vec::<ChatMessageState>::new);
+    let history = use_signal(Value::default);
     let mut input = use_signal(String::new);
     let chat_id = use_signal(|| None::<String>);
     let mut generation_done_nonce = use_signal(|| 0u32);
@@ -323,30 +342,34 @@ fn chat_view(token: String, generation_active: Signal<bool>, list_refresh: Signa
         });
     });
 
-    // reload the message list when generation finishes (server persisted)
+    // reload the message list when generation finishes (server persisted);
+    // display follows the active branch path of history.currentId
     use_effect(move || {
         generation_done_nonce();
-        to_owned![messages, chat_id];
+        to_owned![messages, chat_id, history];
         spawn(async move {
             if let Some(id) = chat_id()
                 && let Ok(chat) = api::api_get(&format!("/api/v1/chats/{id}")).await
             {
-                let history = chat["chat"]["history"]["messages"]
-                    .as_object()
-                    .cloned()
-                    .unwrap_or_default();
-                let mut loaded: Vec<ChatMessageState> = history
+                let blob_history = chat["chat"]["history"].clone();
+                history.set(blob_history.clone());
+                let loaded: Vec<ChatMessageState> = branches::active_path(&blob_history)
                     .iter()
-                    .map(|(id, m)| ChatMessageState {
-                        id: id.clone(),
-                        role: m["role"].as_str().unwrap_or("user").to_string(),
-                        content: m["content"].as_str().unwrap_or_default().to_string(),
-                        done: m["done"].as_bool().unwrap_or(true),
-                        is_error: false,
+                    .map(|id| {
+                        let m = &blob_history["messages"][id.as_str()];
+                        let (sibling_index, sibling_count) =
+                            branches::sibling_position(&blob_history, id);
+                        ChatMessageState {
+                            id: id.clone(),
+                            role: m["role"].as_str().unwrap_or("user").to_string(),
+                            content: m["content"].as_str().unwrap_or_default().to_string(),
+                            done: m["done"].as_bool().unwrap_or(true),
+                            is_error: false,
+                            sibling_index,
+                            sibling_count,
+                        }
                     })
                     .collect();
-                // order by timestamp then id
-                loaded.sort_by_key(|m| m.id.clone());
                 messages.set(loaded);
             }
         });
@@ -366,20 +389,18 @@ fn chat_view(token: String, generation_active: Signal<bool>, list_refresh: Signa
             let this_chat = chat_id().unwrap_or_else(api::uuid_v4);
             chat_id.set(Some(this_chat.clone()));
 
-            messages.push(ChatMessageState {
-                id: user_message_id.clone(),
-                role: "user".into(),
-                content: content.clone(),
-                done: true,
-                is_error: false,
-            });
-            messages.push(ChatMessageState {
-                id: assistant_id.clone(),
-                role: "assistant".into(),
-                content: String::new(),
-                done: false,
-                is_error: false,
-            });
+            messages.push(ChatMessageState::plain(
+                user_message_id.clone(),
+                "user",
+                content.clone(),
+                true,
+            ));
+            messages.push(ChatMessageState::plain(
+                assistant_id.clone(),
+                "assistant",
+                String::new(),
+                false,
+            ));
 
             let body = json!({
                 "model": selected_model(),
@@ -405,6 +426,84 @@ fn chat_view(token: String, generation_active: Signal<bool>, list_refresh: Signa
         }
     };
 
+    // switch to a sibling branch: point history.currentId at it and reload
+    let on_switch = {
+        to_owned![chat_id, generation_done_nonce];
+        move |target_id: String| {
+            spawn(async move {
+                let Some(chat) = chat_id() else { return };
+                let _ = api::api_post(
+                    &format!("/api/v1/chats/{chat}"),
+                    &json!({"chat": {"history": {"currentId": target_id}}}),
+                )
+                .await;
+                generation_done_nonce += 1;
+            });
+        }
+    };
+
+    // edit a user message → sibling branch with a fresh assistant response
+    let on_edit_save = {
+        to_owned![
+            history,
+            chat_id,
+            selected_model,
+            messages,
+            generation_done_nonce
+        ];
+        move |(old_user_id, content): (String, String)| {
+            spawn(async move {
+                let Some(this_chat) = chat_id() else { return };
+                if content.trim().is_empty() {
+                    return;
+                }
+                let old = history()["messages"][old_user_id.as_str()].clone();
+                let parent: Option<String> = old["parentId"]
+                    .as_str()
+                    .filter(|p| !p.is_empty())
+                    .map(str::to_string);
+                let chain =
+                    branches::messages_for_regeneration(&history(), parent.as_deref(), &content);
+                let new_user_id = api::uuid_v4();
+                let new_assistant_id = api::uuid_v4();
+
+                messages.push(ChatMessageState::plain(
+                    new_user_id.clone(),
+                    "user",
+                    content.clone(),
+                    true,
+                ));
+                messages.push(ChatMessageState::plain(
+                    new_assistant_id.clone(),
+                    "assistant",
+                    String::new(),
+                    false,
+                ));
+
+                let body = json!({
+                    "model": selected_model(),
+                    "messages": chain,
+                    "stream": true,
+                    "id": new_assistant_id,
+                    "parent_id": new_user_id,
+                    "chat_id": this_chat,
+                    "user_message": {
+                        "id": new_user_id,
+                        "parentId": parent,
+                        "role": "user",
+                        "content": content,
+                    },
+                });
+                if let Ok((status, response)) = api::api_post("/api/chat/completions", &body).await
+                    && status != 200
+                {
+                    let _ = response;
+                    generation_done_nonce += 1;
+                }
+            });
+        }
+    };
+
     rsx! {
         main { class: "flex-1 flex flex-col bg-gray-950 text-gray-100",
             div { class: "p-2 border-b border-gray-800",
@@ -425,6 +524,9 @@ fn chat_view(token: String, generation_active: Signal<bool>, list_refresh: Signa
                     message_item {
                         key: "{message_key(&message)}",
                         message: message.clone(),
+                        history: history(),
+                        on_switch,
+                        on_edit_save,
                     }
                 }
             }
@@ -454,7 +556,12 @@ fn message_key(message: &ChatMessageState) -> String {
 }
 
 #[component]
-fn message_item(message: ChatMessageState) -> Element {
+fn message_item(
+    message: ChatMessageState,
+    history: Value,
+    on_switch: EventHandler<String>,
+    on_edit_save: EventHandler<(String, String)>,
+) -> Element {
     // The instance key (see message_key) guarantees content is stable for this
     // component's lifetime, so a plain once-computed memo is enough.
     let content = message.content.clone();
@@ -464,15 +571,48 @@ fn message_item(message: ChatMessageState) -> Element {
         rendered();
         spawn(highlight::backfill_code_blocks());
     });
+
+    // local edit state (user messages only)
+    let mut edit_mode = use_signal(|| false);
+    let mut edit_text = use_signal(String::new);
+
     let align = if message.role == "user" {
         "ml-auto max-w-xl"
     } else {
         "mr-auto max-w-2xl"
     };
-    if message.is_error {
+
+    let bubble = if message.is_error {
         rsx! {
             div { class: "max-w-xl px-3 py-2 rounded bg-red-900 whitespace-pre-wrap",
                 "{message.content}"
+            }
+        }
+    } else if edit_mode() {
+        let message_id = message.id.clone();
+        rsx! {
+            div { class: "{align} w-full space-y-2",
+                textarea {
+                    class: "w-full px-3 py-2 rounded bg-gray-800",
+                    value: edit_text(),
+                    rows: 3,
+                    oninput: move |e| edit_text.set(e.value()),
+                }
+                div { class: "flex gap-2 justify-end",
+                    button {
+                        class: "text-xs px-2 py-1 rounded bg-gray-700",
+                        onclick: move |_| edit_mode.set(false),
+                        "Cancel"
+                    }
+                    button {
+                        class: "text-xs px-2 py-1 rounded bg-blue-600",
+                        onclick: move |_| {
+                            edit_mode.set(false);
+                            on_edit_save.call((message_id.clone(), edit_text()));
+                        },
+                        "Save & regenerate"
+                    }
+                }
             }
         }
     } else if message.done {
@@ -493,6 +633,61 @@ fn message_item(message: ChatMessageState) -> Element {
                 span { class: "animate-pulse", "▍" }
             }
         }
+    };
+
+    let has_siblings = message.sibling_count > 1;
+    let can_edit = message.role == "user" && message.done && !edit_mode();
+    if !has_siblings && !can_edit {
+        return bubble;
+    }
+
+    let siblings = branches::siblings_of(&history, &message.id);
+    let current_index = siblings
+        .iter()
+        .position(|id| id == &message.id)
+        .unwrap_or(message.sibling_index.saturating_sub(1));
+    let prev_target = current_index
+        .checked_sub(1)
+        .and_then(|i| siblings.get(i))
+        .cloned();
+    let next_target = siblings.get(current_index + 1).cloned();
+    rsx! {
+        div { class: "space-y-1",
+            {bubble}
+            div { class: "flex items-center gap-1 {align} text-xs text-gray-400",
+                if has_siblings {
+                    button {
+                        class: if prev_target.is_none() { "opacity-30" } else { "cursor-pointer" },
+                        onclick: move |_| {
+                            if let Some(target) = prev_target.clone() {
+                                on_switch.call(target);
+                            }
+                        },
+                        "‹"
+                    }
+                    span { "{message.sibling_index}/{message.sibling_count}" }
+                    button {
+                        class: if next_target.is_none() { "opacity-30" } else { "cursor-pointer" },
+                        onclick: move |_| {
+                            if let Some(target) = next_target.clone() {
+                                on_switch.call(target);
+                            }
+                        },
+                        "›"
+                    }
+                }
+                if can_edit {
+                    button {
+                        class: "ml-2 cursor-pointer hover:text-gray-200",
+                        onclick: move |_| {
+                            edit_text.set(message.content.clone());
+                            edit_mode.set(true);
+                        },
+                        "Edit"
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -501,13 +696,12 @@ fn append_delta(mut messages: Signal<Vec<ChatMessageState>>, message_id: &str, c
     if let Some(slot) = list.iter_mut().find(|m| m.id == message_id) {
         slot.content.push_str(content);
     } else {
-        list.push(ChatMessageState {
-            id: message_id.to_string(),
-            role: "assistant".into(),
-            content: content.to_string(),
-            done: false,
-            is_error: false,
-        });
+        list.push(ChatMessageState::plain(
+            message_id.to_string(),
+            "assistant",
+            content.to_string(),
+            false,
+        ));
     }
 }
 
