@@ -15,6 +15,8 @@
 //! ✅ signout：200 + 清 cookie
 //! ✅ /ollama/{*path} 代理：匿名 401 → 登录后透传（剥 /ollama 前缀）、
 //!   上游非 200 透传、不可达 502、disabled 404
+//! ✅ 双方言：SQLite 必跑；RC_TEST_PG_URL 门控时同一 flow 再跑 Postgres
+//!   （scratch 库 rc_contract_auth_test，跑完由下次运行 FORCE 重建）
 //! ⛔ 刻意不覆盖：OAuth/LDAP/trusted-header（M7）、rate limit（M5）
 
 use axum::body::Body;
@@ -60,6 +62,83 @@ async fn test_app() -> (axum::Router, AppState, tempfile::TempDir) {
     // dist path without index.html → API-only (no fallback service)
     let router = rusty_chat::build_router(state.clone(), dir.path());
     (router, state, dir)
+}
+
+/// PG leg: fresh scratch database bootstrapped to head, gated by
+/// `RC_TEST_PG_URL` (e.g. `postgres://postgres:fixture@localhost:5433/postgres`).
+static PG_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+async fn pg_test_app() -> Option<(axum::Router, AppState, tempfile::TempDir)> {
+    let Ok(url) = std::env::var("RC_TEST_PG_URL") else {
+        return None;
+    };
+    let _guard = PG_LOCK.lock().await;
+    let trimmed = url.trim_end_matches('/');
+    let cut = trimmed.rfind('/').filter(|i| !trimmed[..*i].ends_with(':'));
+    let base = match cut {
+        Some(i) => &trimmed[..i],
+        None => trimmed,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    rc_db::install_drivers();
+    {
+        let pool = sqlx::AnyPool::connect(&format!("{base}/postgres"))
+            .await
+            .unwrap();
+        let mut conn = pool.acquire().await.unwrap();
+        sqlx::raw_sql("DROP DATABASE IF EXISTS rc_contract_auth_test WITH (FORCE);")
+            .execute(&mut *conn)
+            .await
+            .ok();
+        sqlx::raw_sql("CREATE DATABASE rc_contract_auth_test;")
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+    }
+    let db_url = format!("{base}/rc_contract_auth_test");
+    {
+        let pool = sqlx::AnyPool::connect(&db_url).await.unwrap();
+        let mut conn = pool.acquire().await.unwrap();
+        rc_db::bootstrap::bootstrap(&mut conn, rc_db::bootstrap::Dialect::Postgres)
+            .await
+            .unwrap();
+    }
+    let db = sea_orm::Database::connect(&db_url).await.unwrap();
+    let config = std::sync::Arc::new(rc_db::repo::config::ConfigEngine::new(db.clone()));
+    config
+        .seed_defaults(&rusty_chat::defaults::default_config())
+        .await
+        .unwrap();
+    let state = AppState {
+        db,
+        config,
+        secret_key: "contract-test-secret".to_string(),
+        webui_name: "Open WebUI".to_string(),
+        version: env!("CARGO_PKG_VERSION"),
+        placeholder_hash: std::sync::Arc::new(rc_auth::placeholder_hash()),
+        webui_auth: true,
+        hub: std::sync::Arc::new(rc_realtime::Hub::new()),
+    };
+    Some((
+        rusty_chat::build_router(state.clone(), dir.path()),
+        state,
+        dir,
+    ))
+}
+
+/// Runs one flow on SQLite (always) and on Postgres (when gated in).
+macro_rules! everywhere {
+    ($flow:ident) => {{
+        let (router, state, dir) = test_app().await;
+        $flow(router, state, dir).await;
+        if std::env::var("RC_TEST_PG_URL").is_ok() {
+            if let Some((router, state, dir)) = pg_test_app().await {
+                $flow(router, state, dir).await;
+            } else {
+                eprintln!("skipping PG leg: RC_TEST_PG_URL unusable");
+            }
+        }
+    }};
 }
 
 async fn call(
@@ -118,10 +197,11 @@ fn authed_request(
     }
 }
 
-#[tokio::test]
-async fn full_auth_flow_contract() {
-    let (mut router, app, _dir) = test_app().await;
-
+async fn full_auth_flow_contract_flow(
+    mut router: axum::Router,
+    app: AppState,
+    _dir: tempfile::TempDir,
+) {
     // ---- /api/config anonymous, no users → onboarding ----
     let (status, body, _) = call(&mut router, get_request("/api/config", None)).await;
     assert_eq!(status, StatusCode::OK);
@@ -424,12 +504,19 @@ async fn full_auth_flow_contract() {
     );
 }
 
+#[tokio::test]
+async fn full_auth_flow_contract() {
+    everywhere!(full_auth_flow_contract_flow);
+}
+
 /// Duplicate email signup → 400 (claimed by the matrix but previously
 /// untested), including the case-insensitive variant (functional unique
 /// index on lower(email)).
-#[tokio::test]
-async fn signup_duplicate_email_returns_400() {
-    let (mut router, app, _dir) = test_app().await;
+async fn signup_duplicate_email_returns_400_flow(
+    mut router: axum::Router,
+    app: AppState,
+    _dir: tempfile::TempDir,
+) {
     let (status, first, _) = call(
         &mut router,
         json_request(
@@ -474,8 +561,15 @@ async fn signup_duplicate_email_returns_400() {
 }
 
 #[tokio::test]
-async fn api_config_with_authenticated_user_shows_full_features() {
-    let (mut router, _app, _dir) = test_app().await;
+async fn signup_duplicate_email_returns_400() {
+    everywhere!(signup_duplicate_email_returns_400_flow);
+}
+
+async fn api_config_with_authenticated_user_shows_full_features_flow(
+    mut router: axum::Router,
+    _app: AppState,
+    _dir: tempfile::TempDir,
+) {
     let (status, body, _) = call(
         &mut router,
         json_request(
@@ -503,7 +597,15 @@ async fn api_config_with_authenticated_user_shows_full_features() {
 }
 
 #[tokio::test]
-async fn api_models_lists_ollama_backend() {
+async fn api_config_with_authenticated_user_shows_full_features() {
+    everywhere!(api_config_with_authenticated_user_shows_full_features_flow);
+}
+
+async fn api_models_lists_ollama_backend_flow(
+    mut router: axum::Router,
+    app_state: AppState,
+    _dir: tempfile::TempDir,
+) {
     use serde_json::json;
 
     // fake ollama backend
@@ -520,7 +622,6 @@ async fn api_models_lists_ollama_backend() {
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
-    let (mut router, app_state, _dir) = test_app().await;
     app_state
         .config
         .upsert("ollama.enable", &json!(true))
@@ -562,12 +663,20 @@ async fn api_models_lists_ollama_backend() {
     assert_eq!(data[0]["ollama"]["digest"], json!("d1"));
 }
 
+#[tokio::test]
+async fn api_models_lists_ollama_backend() {
+    everywhere!(api_models_lists_ollama_backend_flow);
+}
+
 /// `/ollama/{*path}` reverse proxy contract. Auth first (open-webui mounts
 /// every /ollama route behind get_verified_user), then enable check, then
 /// forwarding semantics. Regression: the proxy used to forward ANONYMOUS
 /// requests straight to the configured ollama backend.
-#[tokio::test]
-async fn ollama_proxy_requires_auth_and_forwards() {
+async fn ollama_proxy_requires_auth_and_forwards_flow(
+    mut router: axum::Router,
+    app_state: AppState,
+    _dir: tempfile::TempDir,
+) {
     use serde_json::json;
 
     let app = axum::Router::new()
@@ -583,7 +692,6 @@ async fn ollama_proxy_requires_auth_and_forwards() {
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
-    let (mut router, app_state, _dir) = test_app().await;
     app_state
         .config
         .upsert("ollama.enable", &json!(true))
@@ -638,4 +746,9 @@ async fn ollama_proxy_requires_auth_and_forwards() {
         .unwrap();
     let (status, body, _) = call(&mut router, get_request("/ollama/api/tags", Some(&token))).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+}
+
+#[tokio::test]
+async fn ollama_proxy_requires_auth_and_forwards() {
+    everywhere!(ollama_proxy_requires_auth_and_forwards_flow);
 }

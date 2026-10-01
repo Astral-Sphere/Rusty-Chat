@@ -13,6 +13,8 @@
 //!   不存在 id 401
 //! ✅ search：大小写不敏感标题匹配
 //! ✔ admin 特权路径（M1 未做 admin 特判，与默认路由一致）
+//! ✅ 双方言：SQLite 必跑；RC_TEST_PG_URL 门控时同一 flow 再跑 Postgres
+//!   （scratch 库 rc_contract_chats_test）
 //! ⛔ 刻意不覆盖：fork/clone（M3）、message 级端点（M3）、import/export（M3）
 
 use axum::body::Body;
@@ -63,6 +65,84 @@ async fn test_app() -> (axum::Router, AppState, tempfile::TempDir) {
     )
 }
 
+/// PG leg: fresh scratch database bootstrapped to head, gated by
+/// `RC_TEST_PG_URL`. Serialized against other suites via a file-scope lock
+/// (the scratch database name is shared).
+static PG_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+async fn pg_test_app() -> Option<(axum::Router, AppState, tempfile::TempDir)> {
+    let Ok(url) = std::env::var("RC_TEST_PG_URL") else {
+        return None;
+    };
+    let _guard = PG_LOCK.lock().await;
+    let trimmed = url.trim_end_matches('/');
+    let cut = trimmed.rfind('/').filter(|i| !trimmed[..*i].ends_with(':'));
+    let base = match cut {
+        Some(i) => &trimmed[..i],
+        None => trimmed,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    rc_db::install_drivers();
+    {
+        let pool = sqlx::AnyPool::connect(&format!("{base}/postgres"))
+            .await
+            .unwrap();
+        let mut conn = pool.acquire().await.unwrap();
+        sqlx::raw_sql("DROP DATABASE IF EXISTS rc_contract_chats_test WITH (FORCE);")
+            .execute(&mut *conn)
+            .await
+            .ok();
+        sqlx::raw_sql("CREATE DATABASE rc_contract_chats_test;")
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+    }
+    let db_url = format!("{base}/rc_contract_chats_test");
+    {
+        let pool = sqlx::AnyPool::connect(&db_url).await.unwrap();
+        let mut conn = pool.acquire().await.unwrap();
+        rc_db::bootstrap::bootstrap(&mut conn, rc_db::bootstrap::Dialect::Postgres)
+            .await
+            .unwrap();
+    }
+    let db = sea_orm::Database::connect(&db_url).await.unwrap();
+    let config = std::sync::Arc::new(rc_db::repo::config::ConfigEngine::new(db.clone()));
+    config
+        .seed_defaults(&rusty_chat::defaults::default_config())
+        .await
+        .unwrap();
+    let state = AppState {
+        db,
+        config,
+        secret_key: "chats-contract-secret".to_string(),
+        webui_name: "Open WebUI".to_string(),
+        version: env!("CARGO_PKG_VERSION"),
+        placeholder_hash: std::sync::Arc::new(rc_auth::placeholder_hash()),
+        webui_auth: true,
+        hub: std::sync::Arc::new(rc_realtime::Hub::new()),
+    };
+    Some((
+        rusty_chat::build_router(state.clone(), dir.path()),
+        state,
+        dir,
+    ))
+}
+
+/// Runs one flow on SQLite (always) and on Postgres (when gated in).
+macro_rules! everywhere {
+    ($flow:ident) => {{
+        let (router, state, dir) = test_app().await;
+        $flow(router, state, dir).await;
+        if std::env::var("RC_TEST_PG_URL").is_ok() {
+            if let Some((router, state, dir)) = pg_test_app().await {
+                $flow(router, state, dir).await;
+            } else {
+                eprintln!("skipping PG leg: RC_TEST_PG_URL unusable");
+            }
+        }
+    }};
+}
+
 async fn call(router: &mut axum::Router, request: Request<Body>) -> (StatusCode, Value) {
     let response = router.clone().oneshot(request).await.unwrap();
     let status = response.status();
@@ -96,10 +176,11 @@ fn blob(title: &str) -> Value {
     }}})
 }
 
-#[tokio::test]
-async fn chats_crud_contract() {
-    let (mut router, app_state, _dir) = test_app().await;
-
+async fn chats_crud_contract_flow(
+    mut router: axum::Router,
+    app_state: AppState,
+    _dir: tempfile::TempDir,
+) {
     // two users
     let (_, user_a) = call(
         &mut router,
@@ -481,15 +562,21 @@ async fn chats_crud_contract() {
     // update, not on delete (OWU parity).
 }
 
+#[tokio::test]
+async fn chats_crud_contract() {
+    everywhere!(chats_crud_contract_flow);
+}
+
 /// Tags writes are owner-checked at the ROUTE level (open-webui
 /// routers/chats.py add_tag_by_id_and_tag_name resolves the chat via
 /// get_chat_by_id_and_user_id first). Regression: the repo-level
 /// update_chat_tags_by_id looks the row up by id only, so without the route
 /// check any signed-in user could rewrite another user's chat tags.
-#[tokio::test]
-async fn tags_ownership_contract() {
-    let (mut router, app_state, _dir) = test_app().await;
-
+async fn tags_ownership_contract_flow(
+    mut router: axum::Router,
+    app_state: AppState,
+    _dir: tempfile::TempDir,
+) {
     let (_, user_a) = call(
         &mut router,
         req(
@@ -588,4 +675,9 @@ async fn tags_ownership_contract() {
     .await;
     assert_eq!(status, StatusCode::OK, "{tags}");
     assert_eq!(tags.as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn tags_ownership_contract() {
+    everywhere!(tags_ownership_contract_flow);
 }
