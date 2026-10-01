@@ -1,5 +1,10 @@
 //! Browser API helpers: localStorage token persistence, HTTP via gloo-net,
 //! a reconnecting WebSocket channel, and a small uuid generator.
+//!
+//! 覆盖矩阵：⛔ 无 host 单元测试——全部函数都是 web-sys/gloo 薄封装
+//! （localStorage/fetch/WebSocket/Clipboard/navigator），脱离浏览器无
+//! 意义；行为由浏览器冒烟覆盖（PROGRESS「环境注意」记录的 rAF 替身流程）。
+//! uuid_v4 的位运算版本/变体位由 crypto_random 直产，格式由消费方校验。
 
 use serde_json::{Value, json};
 use wasm_bindgen::JsCast;

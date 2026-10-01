@@ -6,7 +6,9 @@
 //! 覆盖矩阵（tests below）:
 //! ✅ build_view 投影（active_path + 兄弟位置 + model 字段透传）
 //! ✅ 消息组件 key 稳定性（内容变化才重建 memo 渲染）
-//! ✅ 流式 append/finalize/error 三条路径（slot 缺失时补建）
+//! ✅ 流式 append/finalize/error 三条路径（slot 缺失时补建）；加固：
+//!    finalize 未知 id no-op、无 content 不清空流式文本、CJK/emoji 增量、
+//!    done 后迟到 delta 语义、build_view 退化 history、key 组成维度
 //! ⛔ 刻意不覆盖：WS 流式/发送/编辑分支的端到端行为（native contract 测试
 //!    与浏览器冒烟覆盖，对应 contract_branches / contract_tasks）；
 //!    DOM 滚动副作用（浏览器冒烟）。
@@ -1069,5 +1071,99 @@ mod tests {
         // error for an unknown message id is a no-op (no phantom slot)
         mark_error(&mut messages, "ghost");
         assert_eq!(messages.len(), 1);
+    }
+
+    // --- 加固批次：流式与投影的退化输入 -------------------------------------
+
+    #[test]
+    fn finalize_unknown_id_is_noop() {
+        let mut messages = vec![ChatMessageState::plain(
+            "a1".into(),
+            "assistant",
+            String::new(),
+            false,
+        )];
+        finalize_message(&mut messages, "ghost", &json!({"data": {"content": "x"}}));
+        assert_eq!(messages.len(), 1);
+        assert!(!messages[0].done, "unknown id must not complete anything");
+    }
+
+    #[test]
+    fn finalize_without_content_keeps_streamed_text() {
+        // done frames always carry content from our server, but a server
+        // without one must not blank the streamed text
+        let mut messages = vec![ChatMessageState::plain(
+            "a1".into(),
+            "assistant",
+            "partial".into(),
+            false,
+        )];
+        finalize_message(&mut messages, "a1", &json!({"data": {}}));
+        assert_eq!(messages[0].content, "partial");
+        assert!(messages[0].done);
+    }
+
+    #[test]
+    fn cjk_and_emoji_deltas_stay_intact() {
+        // WS frames are whole strings (api.rs drops invalid UTF-8 frames),
+        // so multi-byte characters arrive whole — pin the accumulation
+        let mut messages = vec![ChatMessageState::plain(
+            "a1".into(),
+            "assistant",
+            String::new(),
+            false,
+        )];
+        for chunk in ["你好", "世界", "🚀", "🎉漢字"] {
+            append_delta(&mut messages, "a1", chunk);
+        }
+        assert_eq!(messages[0].content, "你好世界🚀🎉漢字");
+    }
+
+    #[test]
+    fn late_delta_after_done_appends_but_stays_done() {
+        // semantics pinned: a straggler delta after the done frame still
+        // appends (server always sends deltas before done in practice)
+        let mut messages = vec![ChatMessageState::plain(
+            "a1".into(),
+            "assistant",
+            "done text".into(),
+            false,
+        )];
+        messages[0].done = true;
+        append_delta(&mut messages, "a1", " + late");
+        assert!(messages[0].done);
+        assert_eq!(messages[0].content, "done text + late");
+    }
+
+    #[test]
+    fn build_view_degenerate_histories() {
+        // Null / empty history → empty projection
+        assert!(build_view(&Value::Null).is_empty());
+        assert!(build_view(&json!({})).is_empty());
+        // node missing role/done/content/model gets the same defaults the
+        // blob contract promises
+        let history = json!({
+            "currentId": "m1",
+            "messages": {"m1": {"id": "m1"}}
+        });
+        let view = build_view(&history);
+        assert_eq!(view.len(), 1);
+        assert_eq!(view[0].role, "user");
+        assert!(view[0].done);
+        assert_eq!(view[0].content, "");
+        assert_eq!(view[0].model, None);
+    }
+
+    #[test]
+    fn message_key_differs_by_id_and_content() {
+        let a = ChatMessageState::plain("a1".into(), "assistant", "hello".into(), true);
+        let mut b = a.clone();
+        b.id = "a2".into();
+        assert_ne!(message_key(&a), message_key(&b), "id participates");
+        let mut c = a.clone();
+        c.content = "hello!".into();
+        assert_ne!(message_key(&a), message_key(&c), "content participates");
+        let d = a.clone();
+        assert_eq!(message_key(&a), message_key(&d), "stable for equal state");
     }
 }

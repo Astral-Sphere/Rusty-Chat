@@ -6,7 +6,11 @@
 //! ✅ time_range 边界（今天/昨天/过去 7 天/过去 30 天/更早月份）
 //! ✅ 跨时区偏移（local day 按 tz_offset 折算，含负偏移/跨年）
 //! ✅ time_ago 分桶（分钟/小时/天/周/年、下限 1 分钟、未来时间钳制为 0）
-//! ✅ group_chats 排序：组按首次出现序（新→旧天然成立），组内保序
+//! ✅ group_chats 排序：组按首次出现序（新→旧天然成立），组内保序；
+//!    乱序输入产生重复组标签属调用方契约（已钉死）
+//! ✅ 加固：time_ago 精确边界（3599/3600/86400/7d/365d）、未来时间戳落组、
+//!    闰日与世纪年 civil_from_days 往返、pre-epoch、±极值时区跨日、
+//!    avatar_letter 兜底、percent_encode（保留集/多字节/空串）
 //! ⛔ 刻意不覆盖：DOM/网络副作用（拉列表、搜索请求、删除、菜单交互）——
 //!    属浏览器冒烟范围（对应 open-webui Sidebar.svelte 的行为由视觉验收对拍）。
 
@@ -718,5 +722,94 @@ mod tests {
             title: id.into(),
             updated_at,
         }
+    }
+
+    // -- 加固批次：精确边界与钉死 --
+
+    #[test]
+    fn time_ago_exact_bucket_edges() {
+        // < 3600s → minutes (min 1); 3600 → first hour bucket
+        assert_eq!(time_ago(NOW - 3_599, NOW), "59分钟前");
+        assert_eq!(time_ago(NOW - 3_600, NOW), "1小时前");
+        assert_eq!(time_ago(NOW - 86_399, NOW), "23小时前");
+        assert_eq!(time_ago(NOW - 86_400, NOW), "1天前");
+        assert_eq!(time_ago(NOW - 7 * 86_400 - 1, NOW), "1周前");
+        assert_eq!(time_ago(NOW - 364 * 86_400, NOW), "52周前");
+        assert_eq!(time_ago(NOW - 365 * 86_400, NOW), "1年前");
+    }
+
+    #[test]
+    fn future_timestamps_outside_today_land_in_previous7() {
+        // open-webui semantics pinned: a future local-day mismatch falls
+        // through Today/Yesterday into the `> now − 7d` bucket
+        assert_eq!(time_range(NOW + 3_600, NOW, TZ), TimeGroup::Today);
+        assert_eq!(
+            time_range(NOW + 48 * 3_600, NOW, TZ),
+            TimeGroup::Previous7Days
+        );
+        // time_ago clamps to "just now"-style minute label
+        assert_eq!(time_ago(NOW + 500, NOW), "1分钟前");
+    }
+
+    #[test]
+    fn civil_from_days_leap_year_era_roundtrips() {
+        // 1900 (non-leap century), 2000 (leap century), 2100 (non-leap)
+        let cases = [
+            (ts(1900, 3, 1, 12, 0), (1900, 3, 1)),
+            (ts(2000, 2, 29, 12, 0), (2000, 2, 29)),
+            (ts(2100, 3, 1, 12, 0), (2100, 3, 1)),
+            (ts(2024, 2, 29, 12, 0), (2024, 2, 29)),
+        ];
+        for (instant, expected) in cases {
+            let got = civil_from(instant, 0);
+            assert_eq!(got, expected, "instant {instant}");
+        }
+    }
+
+    #[test]
+    fn pre_epoch_and_extreme_timezones() {
+        // pre-1970 (div_euclid keeps the math honest): older than the
+        // 30-day window of `now = 0` → Month(1969, 12)
+        assert_eq!(time_range(-40 * 86_400, 0, 0), TimeGroup::Month(1969, 11));
+        // date-line flip for the SAME hour-old instant: at +14h (Kiribati)
+        // both now and now−1h sit on Oct 2 local → Today; at −12h
+        // (Baker Island) the hour step crosses back over local midnight
+        // into Sep 30 → Yesterday
+        assert_eq!(time_range(NOW - 3_600, NOW, 14 * 3600), TimeGroup::Today);
+        assert_eq!(
+            time_range(NOW - 3_600, NOW, -12 * 3600),
+            TimeGroup::Yesterday
+        );
+    }
+
+    #[test]
+    fn group_chats_newest_first_contract_is_on_the_caller() {
+        // the pure function preserves input order; a non-sorted input would
+        // produce repeated group labels — pinned so callers know the contract
+        let out = group_chats(&[entry("b", NOW - 90 * 86_400), entry("a", NOW)], NOW, TZ);
+        let labels: Vec<&String> = out.iter().map(|(l, _)| l).collect();
+        assert_eq!(
+            labels,
+            vec!["7月", "今天"],
+            "one label per first appearance"
+        );
+    }
+
+    #[test]
+    fn avatar_letter_first_visible_char_or_fallback() {
+        assert_eq!(avatar_letter("Alice"), "A");
+        assert_eq!(avatar_letter(" 中文"), "中");
+        assert_eq!(avatar_letter("  "), "用");
+        assert_eq!(avatar_letter(""), "用");
+        assert_eq!(avatar_letter("\t x"), "x");
+    }
+
+    #[test]
+    fn percent_encode_unreserved_and_multibyte() {
+        assert_eq!(percent_encode("safe-_.~09"), "safe-_.~09");
+        assert_eq!(percent_encode("a b"), "a%20b");
+        assert_eq!(percent_encode("中"), "%E4%B8%AD");
+        assert_eq!(percent_encode(""), "");
+        assert_eq!(percent_encode("100%"), "100%25");
     }
 }

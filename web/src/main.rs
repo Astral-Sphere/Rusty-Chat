@@ -2,6 +2,10 @@
 //! (chat list / search / user menu), and the chat view. Message rendering
 //! pipeline lives in render.rs + highlight.rs + mermaid.rs; tree semantics in
 //! branches.rs; view logic in chat.rs + sidebar.rs.
+//!
+//! 覆盖矩阵：⛔ 无 host 单元测试——app()/login_view 是 Signal 编排与 rsx；
+//! 登录/注册切换与错误文案属浏览器冒烟范围。可提取的纯逻辑（时间分组、
+//! 树语义、渲染管线）都在各自模块内测。
 
 mod api;
 mod branches;

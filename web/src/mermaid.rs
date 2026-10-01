@@ -9,6 +9,7 @@
 //! ✅ sebastian 核心：flowchart / pie → SVG；非法源码 → Err（host 可测）
 //! ✅ DOM 替换逻辑（wasm-only）按 data-mermaid 标记幂等；成功替换 <pre>，
 //!    失败保留源码 + 错误提示（浏览器冒烟在 T5）
+//! ✅ 图内标签的 HTML 转义（<img>/<script> 不可能经 set_inner_html 入 DOM）
 //! ⛔ 刻意不覆盖：18 种图型逐一渲染（sebastian 上游回归测试体系负责）
 
 use wasm_bindgen::JsCast;
@@ -87,5 +88,25 @@ mod tests {
     #[test]
     fn invalid_source_is_an_error() {
         assert!(sebastian::render_diagram("not a diagram at all ???", "test-bad").is_err());
+    }
+
+    #[test]
+    fn hostile_labels_cannot_smuggle_tags_into_the_svg() {
+        // the SVG is injected via set_inner_html. sebastian's sanitizer
+        // STRIPS hostile tags from labels (an <img onerror> vanishes whole;
+        // <script> is removed leaving inert text inside <foreignObject>).
+        // Either behavior is safe — assert no live tag survives, whichever
+        // path sebastian takes (render failure is equally acceptable: the
+        // fence degrades to source text).
+        let svg = sebastian::render_diagram(
+            r#"flowchart TD
+    A["<img src=x onerror=alert(1)>"] --> B["<script>alert(2)</script>"]"#,
+            "test-xss",
+        );
+        if let Ok(svg) = svg {
+            assert!(!svg.contains("<img"), "{svg}");
+            assert!(!svg.contains("<script"), "{svg}");
+            assert!(!svg.contains("onerror"), "{svg}");
+        }
     }
 }

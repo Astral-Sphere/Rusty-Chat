@@ -1,6 +1,9 @@
 //! Inline SVG icon set — lucide-style 24×24 strokes rendered directly in
 //! rsx (no image assets, no JS). Path data is the standard lucide glyph set
 //! (ISC license); stroke widths follow open-webui's usage per context.
+//!
+//! 覆盖矩阵：⛔ 无测试——纯 rsx 声明（组件仅展开为 path 数据），无逻辑
+//! 分支；视觉正确性由界面对照验收覆盖。
 
 use dioxus::prelude::*;
 
