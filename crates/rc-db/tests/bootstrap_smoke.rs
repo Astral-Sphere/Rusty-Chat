@@ -261,18 +261,23 @@ async fn postgres_refuses_wrong_revision() {
 }
 
 /// PG-side LegacyUnstamped refusal (pre-existing tables, no alembic stamp).
+/// `user` is a RESERVED WORD in Postgres — the table must be created as
+/// `"user"` (which still lands as lowercase `user`, exactly what
+/// `table_exists(conn, "user")` probes for). SQLite tolerates the bare word,
+/// which is why the twin above never caught this.
 #[tokio::test]
 async fn postgres_refuses_legacy_unstamped_database() {
     let Some(mut conn) = pg_scratch_rc_db_pg_legacy().await else {
         return;
     };
-    sqlx::raw_sql(
-        "CREATE TABLE user (id VARCHAR PRIMARY KEY, email VARCHAR); \
-         CREATE TABLE auth (id VARCHAR PRIMARY KEY, password TEXT);",
-    )
-    .execute(&mut *conn)
-    .await
-    .unwrap();
+    sqlx::raw_sql(r#"CREATE TABLE "user" (id VARCHAR PRIMARY KEY, email VARCHAR);"#)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    sqlx::raw_sql("CREATE TABLE auth (id VARCHAR PRIMARY KEY, password TEXT);")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
     assert_eq!(
         inspect_database(&mut conn).await.unwrap(),
         DatabaseState::LegacyUnstamped

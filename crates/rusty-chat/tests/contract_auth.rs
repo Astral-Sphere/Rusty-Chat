@@ -72,7 +72,9 @@ async fn pg_test_app() -> Option<(axum::Router, AppState, tempfile::TempDir)> {
     let Ok(url) = std::env::var("RC_TEST_PG_URL") else {
         return None;
     };
-    let _guard = PG_LOCK.lock().await;
+    // NB: the scratch-database lock is held by the `everywhere!` macro for
+    // the WHOLE PG leg — locking here would release before the flow runs,
+    // letting a parallel test's DROP ... FORCE kill our live connections.
     let trimmed = url.trim_end_matches('/');
     let cut = trimmed.rfind('/').filter(|i| !trimmed[..*i].ends_with(':'));
     let base = match cut {
@@ -132,6 +134,10 @@ macro_rules! everywhere {
         let (router, state, dir) = test_app().await;
         $flow(router, state, dir).await;
         if std::env::var("RC_TEST_PG_URL").is_ok() {
+            // hold the scratch-database lock across create + flow: parallel
+            // tests share one scratch DB name, and DROP ... FORCE would reap
+            // another test's live connections
+            let _guard = PG_LOCK.lock().await;
             if let Some((router, state, dir)) = pg_test_app().await {
                 $flow(router, state, dir).await;
             } else {

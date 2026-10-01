@@ -1002,26 +1002,31 @@ async fn chat_repair_flow(db: &DatabaseConnection) {
     assert_eq!(repaired.current_message_id.as_deref(), Some("a2"));
 
     // read-time sanitize PERSISTS: NUL bytes are scrubbed in the stored row,
-    // not just the response (OWU `_sanitize_chat_row` semantics)
-    let dirty = json!({
-        "title": "t\u{0}x",
-        "history": {"currentId": "m", "messages": {
-            "m": {"id": "m", "parentId": null, "childrenIds": [], "role": "user", "content": "a\u{0}b", "timestamp": 1}
-        }}
-    });
-    insert_raw_chat(db, "br3", &dirty).await;
-    let cleaned = chats::get_chat_by_id(db, "br3").await.unwrap().unwrap();
-    assert_eq!(cleaned.title.as_deref(), Some("tx"));
-    use rc_db::entity::chat;
-    use sea_orm::EntityTrait as _;
-    let raw = chat::Entity::find_by_id("br3")
-        .one(db)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(raw.title.as_deref(), Some("tx"), "write-back to the row");
-    let raw_blob = raw.chat.unwrap().to_string();
-    assert!(!raw_blob.contains("\\u0000"), "blob scrubbed: {raw_blob}");
+    // not just the response (OWU `_sanitize_chat_row` semantics).
+    // SQLite-only segment: Postgres TEXT rejects 0x00 outright (22021), so
+    // on PG the dirty row cannot exist in the first place — that rejection
+    // IS the compat fact, and the write-back concern vanishes.
+    if db.get_database_backend() == sea_orm::DatabaseBackend::Sqlite {
+        let dirty = json!({
+            "title": "t\u{0}x",
+            "history": {"currentId": "m", "messages": {
+                "m": {"id": "m", "parentId": null, "childrenIds": [], "role": "user", "content": "a\u{0}b", "timestamp": 1}
+            }}
+        });
+        insert_raw_chat(db, "br3", &dirty).await;
+        let cleaned = chats::get_chat_by_id(db, "br3").await.unwrap().unwrap();
+        assert_eq!(cleaned.title.as_deref(), Some("tx"));
+        use rc_db::entity::chat;
+        use sea_orm::EntityTrait as _;
+        let raw = chat::Entity::find_by_id("br3")
+            .one(db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(raw.title.as_deref(), Some("tx"), "write-back to the row");
+        let raw_blob = raw.chat.unwrap().to_string();
+        assert!(!raw_blob.contains("\\u0000"), "blob scrubbed: {raw_blob}");
+    }
 }
 
 /// chat_message insert/patch: created_at ← blob timestamp, camelCase alt
