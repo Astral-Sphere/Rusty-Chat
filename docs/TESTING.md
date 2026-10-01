@@ -62,3 +62,10 @@
 
 - `rc-core`：timestamp 单位/区间/序列化/conversion（5 用例）。
 - `rc-db::bootstrap`：fresh bootstrap、幂等、43 表计数、错误版本拒绝、legacy 无戳拒绝、真实 fixture 打开+读写、PG 门控全流程（7 用例）。
+
+## 7. M1 测试加固后的实际布局（2026-10-01）
+
+- **native**（`cargo test --workspace`）：190 项 —— rc-core 40 / rc-auth 28+3 / rc-db 18+9+13 / rc-highlight 21 / rc-llm 26 / rc-realtime 4 / rusty-chat 契约 21+doctest。
+- **web**（`cd web && cargo test`，host 跑）：86 项 —— render 26 / branches 21 / sidebar 18 / chat 12 / highlight 5 / mermaid 4。
+- **PG 双跑范围**：rc-db repo 全部 flow + bootstrap；rusty-chat 的 `contract_auth` 与 `contract_chats`（RC_TEST_PG_URL 门控，scratch 库自动建删）。其余契约文件 SQLite-only，扩展时按 contract_auth 的 `everywhere!` 模式补 PG 腿。
+- **矩阵纪律**：本轮修正了 5 处矩阵虚报（jwt 错误算法、repo api_key 级联、render `\$`、ollama tags 500、auth 重复 email）——矩阵声明必须与测试一一对应，审查时逐行核对。

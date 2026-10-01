@@ -97,6 +97,26 @@
 - [x] **验收**：mock ollama 全链路浏览器冒烟——注册→空态→发送（流式/markdown/KaTeX/tree-sitter 高亮/mermaid）→标题生成（侧栏"今天"分组 + navbar）→编辑原位替换 ‹2/2›→切回 1/2 完整旧链→搜索→删除→折叠/展开→模型下拉→用户菜单。门禁：native 124 + web 56 测试全绿，双 workspace clippy/fmt 干净。
 - **环境注意（自动化）**：ZCode IAB 面板失焦时 `requestAnimationFrame` 完全停摆（visibilityState 仍 "visible"），Dioxus-web 依赖 rAF flush 渲染 → 页面"点击无响应"。上一会话的"CUA 事件零到达"即此。冒烟时先注入 `window.requestAnimationFrame = cb => setTimeout(() => cb(performance.now()), 16)` 替身（仅测试环境，真实浏览器无此问题）。另：Playwright 元素 actionability 检查同样依赖原生 rAF 会超时，用 evaluate `el.click()` 替代。
 
+## M1 测试加固（2026-10-01 完成，用户要求"检查 M1 代码、在必要处完善测试、力求万无一失"）
+
+三个 Explore 代理全量盘点（后端基础 crate / HTTP+LLM 层 / web 前端）+ 人工核实。结果：**修复 5 个真 bug、修正 5 处矩阵虚报、native 124→190 / web 56→86**。提交链：5cb3479 → f7b86cb。
+
+### 本轮揪出的真 bug（均为复现测试先行）
+1. **chats tags 越权写**（5cb3479）：`POST /api/v1/chats/{id}/tags` 无属主校验，任意登录用户可改他人 chat 标签（repo 函数按 id-only 取行；OWU 在路由层先 get_chat_by_id_and_user_id）→ 路由补 401 门。
+2. **/ollama 代理无鉴权 + 转发路径错**（2951404）：匿名可直达后端；且转发的是含 `/ollama` 前缀的原始路径（上游永远 404）→ 加 VerifiedUser + 剥前缀。
+3. **web leaf_descendant 环死循环**（9261881）：childrenIds 成环时标签页冻结（只有自环防护）→ visited 集合。
+4. **ollama ndjson 丢数据**（8befde9）：无结尾换行的末行（usage/done）被静默丢弃；同行 thinking+content 只发 thinking 丢 content → pending 队列 + 末行冲刷。
+5. **KaTeX 递归宏栈溢出**（320be69）：`\def\x{...\x}\x` 展开 1000 层嵌套解析压垮 8MB host 栈（wasm 必炸）→ render_tex 限 max_expand=32。
+
+### 矩阵虚报修正（补齐声明了却不存在的测试）
+jwt 错误算法拒绝、repo api_key 级联（被删用户根本没建 key）、render 转义 `\$`、ollama tags 500 降级、auth 重复 email 400。另修 rc-auth Cargo.toml 虚报 Fernet 并移除无用依赖（rc-db/sha2/hex）。
+
+### 结构性增强
+- rusty-chat 新契约电池：`contract_chats_edges`（分页边界/六路由不存在 id/归档全量/全删幂等/share 负路径/search 边界/title-only 不 touch）、`contract_chat_edges`（stream=false 全链/WS 负路径/上游失败事件/标题抑制）、`contract_surface_edges`（config 48 键+permissions 树+DB 覆盖、models pending 401/去重/全挂空、tasks params 过滤/回退/上游 400）。
+- `contract_auth` + `contract_chats` 升级为**双方言**（RC_TEST_PG_URL 门控 PG 腿，everywhere! 宏模式）；其余契约文件仍 SQLite-only。
+- DELETE /api/v1/chats 改为无条件 true（对齐 OWU）；全部门禁绿（native 190 + web 86 + 双 clippy/fmt + dx wasm 构建）。
+- 教训：门禁管道用 `| grep/awk` 会吞 cargo 退出码（两次带病提交靠 amend 补救）——**一律用 `> log 2>&1; echo $?` 形式**。
+
 ## 阻塞/待办
 
 - LICENSE 未定（D-009）：M1 前不阻塞；公开发布前必须定（注意 openai-interface AGPL 联动）。
