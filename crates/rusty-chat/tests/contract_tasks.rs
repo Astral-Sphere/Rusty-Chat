@@ -13,10 +13,13 @@
 //! ✅ prompt 模板渲染（mock 后端捕获请求体断言 "USER: …" 行与模型 id）
 //! ✅ 自动触发：新聊天首轮完成后 chat:title WS 事件 + title 列落库
 //! ✅ 二轮不再触发（chat:title 仅一次）
+//! ✅ task.model.params 过滤：null/空串参数被剔除，实值透传到 provider 载荷
+//! ✅ 配置的任务模型不存在 → 回退请求模型（响应 model 字段 == 请求模型）
+//! ✅ 上游失败 → 400 + "An internal error has occurred."（非 500）
 //! ⛔ 刻意不覆盖：task.model.external 路径（与 default 同一解析函数，
-//!    单元语义已由 rc-core 锁定）；task.model.params 透传（apply 分支
-//!    由 openai adapter 参数测试覆盖）；PG 方言（repo 层已由双方言
-//!    集成测试覆盖）
+//!    单元语义已由 rc-core 锁定）；background title 的 reasoning_content
+//!    兜底（两个 adapter 的非流式响应当前不产出 reasoning_content，M5）；
+//!    PG 方言（repo 层已由双方言集成测试覆盖）
 
 use axum::Json;
 use axum::body::Body;
@@ -448,4 +451,159 @@ async fn call(
             .unwrap_or(Value::String(String::from_utf8_lossy(&bytes).into()))
     };
     (status, body, set_cookie)
+}
+
+/// task.model.params filtering: null and empty-string values are dropped,
+/// real values pass through to the provider payload (open-webui
+/// get_task_model_generation_config).
+#[tokio::test]
+async fn title_task_model_params_filtered() {
+    let (router, app_state, _dir) = test_app().await;
+    let capture: Capture = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let ollama_url = spawn_ollama_mock(capture.clone()).await;
+    app_state
+        .config
+        .upsert("ollama.enable", &json!(true))
+        .await
+        .unwrap();
+    app_state
+        .config
+        .upsert("ollama.base_urls", &json!([ollama_url]))
+        .await
+        .unwrap();
+    app_state
+        .config
+        .upsert(
+            "task.model.params",
+            &json!({"temperature": null, "stop": "", "seed": 7}),
+        )
+        .await
+        .unwrap();
+    let base = serve(router).await;
+    let token = signup_token(&base).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/api/v1/tasks/title/completions"))
+        .bearer_auth(&token)
+        .json(&json!({"model": "llama3:8b", "messages": [
+            {"role": "user", "content": "Title this chat"}
+        ]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let bodies = capture.lock().await;
+    let chat_call = bodies
+        .iter()
+        .find(|b| !b.to_string().contains("### Task:") || true)
+        .expect("provider was called");
+    // ollama payload nests recognized params under options
+    let options = &chat_call["options"];
+    assert_eq!(options["seed"], json!(7), "real param passes through");
+    assert!(
+        options.get("temperature").is_none(),
+        "null param must be dropped: {options}"
+    );
+    assert!(
+        options.get("stop").is_none(),
+        "empty-string param must be dropped: {options}"
+    );
+}
+
+/// A configured task model that does not exist falls back to the requested
+/// model (get_task_model_id parity: only REAL models are routed to).
+#[tokio::test]
+async fn title_falls_back_when_configured_task_model_missing() {
+    let (router, app_state, _dir) = test_app().await;
+    let capture: Capture = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let ollama_url = spawn_ollama_mock(capture.clone()).await;
+    app_state
+        .config
+        .upsert("ollama.enable", &json!(true))
+        .await
+        .unwrap();
+    app_state
+        .config
+        .upsert("ollama.base_urls", &json!([ollama_url]))
+        .await
+        .unwrap();
+    app_state
+        .config
+        .upsert("task.model.default", &json!("ghost-model"))
+        .await
+        .unwrap();
+    let base = serve(router).await;
+    let token = signup_token(&base).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/api/v1/tasks/title/completions"))
+        .bearer_auth(&token)
+        .json(&json!({"model": "qwen:0.5b", "messages": [
+            {"role": "user", "content": "Hello"}
+        ]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(
+        body["model"],
+        json!("qwen:0.5b"),
+        "nonexistent configured task model → requested model answers"
+    );
+}
+
+/// Upstream failure during title generation → 400 "An internal error has
+/// occurred." (open-webui's DEFAULT error detail), not a 500/panic.
+#[tokio::test]
+async fn title_upstream_failure_returns_400() {
+    let (router, app_state, _dir) = test_app().await;
+    let app = axum::Router::new()
+        .route(
+            "/api/tags",
+            axum::routing::get(|| async {
+                axum::Json(json!({"models": [
+                    {"name": "llama3:8b", "model": "llama3:8b", "digest": "d", "size": 1}
+                ]}))
+            }),
+        )
+        .route(
+            "/api/chat",
+            axum::routing::post(|| async {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    "down for maintenance",
+                )
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    app_state
+        .config
+        .upsert("ollama.enable", &json!(true))
+        .await
+        .unwrap();
+    app_state
+        .config
+        .upsert("ollama.base_urls", &json!([format!("http://{addr}")]))
+        .await
+        .unwrap();
+    let base = serve(router).await;
+    let token = signup_token(&base).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/api/v1/tasks/title/completions"))
+        .bearer_auth(&token)
+        .json(&json!({"model": "llama3:8b", "messages": [
+            {"role": "user", "content": "Hello"}
+        ]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["detail"], json!("An internal error has occurred."));
 }
