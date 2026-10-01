@@ -161,8 +161,9 @@ mod tests {
 
     // 覆盖矩阵：
     // ✅ openai /models：bearer 头、data 数组解析、prefix_id 命名空间、
-    //    urlIdx 提取、非 200 → 空列表
-    // ✅ dedup：同名 id 后者覆盖
+    //    urlIdx 提取、非 200 / 缺 data / 无 id 项 → 降级
+    // ✅ dedup：同名 id 后者覆盖；all_base_models 真实跨连接去重（末者胜）
+    // ✅ ollama loaded 标志来自 expires_at
     // ✅ disabled 后端不请求
     // ⛔ 刻意不覆盖：api_configs per-connection 扩展（M3）
 
@@ -249,5 +250,117 @@ mod tests {
         map.insert(a.id.clone(), a);
         map.insert(b.id.clone(), b);
         assert_eq!(map["m"].name, "second", "last wins");
+    }
+
+    #[tokio::test]
+    async fn all_base_models_dedupes_across_connections_last_wins() {
+        // REAL dedup through all_base_models (the test above only pins the
+        // BTreeMap literal): two connections serving the same unprefixed id
+        let url_a = spawn_openai_mock(
+            json!({"object": "list", "data": [
+                {"id": "dup", "object": "model", "owned_by": "vendorA"}
+            ]}),
+            None,
+        )
+        .await;
+        let url_b = spawn_openai_mock(
+            json!({"object": "list", "data": [
+                {"id": "dup", "object": "model", "owned_by": "vendorB"}
+            ]}),
+            None,
+        )
+        .await;
+        let cfg = BackendConfig {
+            openai_enable: true,
+            openai_connections: vec![
+                OpenAiConnection {
+                    base_url: url_a,
+                    api_key: None,
+                    prefix_id: None,
+                },
+                OpenAiConnection {
+                    base_url: url_b,
+                    api_key: None,
+                    prefix_id: None,
+                },
+            ],
+            ..Default::default()
+        };
+        let models = all_base_models(&cfg).await.unwrap();
+        assert_eq!(models.len(), 1, "same id collapses to one entry");
+        assert_eq!(models[0].owned_by, "vendorB", "the LAST connection wins");
+    }
+
+    #[tokio::test]
+    async fn fetch_openai_models_degrades_on_bad_payloads() {
+        // non-200 → empty
+        let bad = spawn_openai_mock(json!({"error": "x"}), None).await;
+        let failing = axum::Router::new().route(
+            "/models",
+            axum::routing::get(|| async { axum::http::StatusCode::INTERNAL_SERVER_ERROR }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr500 = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, failing).await.unwrap() });
+
+        let conn = OpenAiConnection {
+            base_url: format!("http://{addr500}"),
+            api_key: None,
+            prefix_id: None,
+        };
+        assert!(fetch_openai_models(&conn).await.is_empty(), "500 → []");
+
+        // 200 without a data array → empty
+        let conn = OpenAiConnection {
+            base_url: bad.clone(),
+            api_key: None,
+            prefix_id: None,
+        };
+        assert!(
+            fetch_openai_models(&conn).await.is_empty(),
+            "missing data → []"
+        );
+
+        // items without an id are skipped, valid ones survive
+        let url = spawn_openai_mock(
+            json!({"object": "list", "data": [
+                {"object": "model", "owned_by": "x"},
+                {"id": "ok", "object": "model", "owned_by": "y"}
+            ]}),
+            None,
+        )
+        .await;
+        let conn = OpenAiConnection {
+            base_url: url,
+            api_key: None,
+            prefix_id: None,
+        };
+        let models = fetch_openai_models(&conn).await;
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "ok");
+    }
+
+    #[tokio::test]
+    async fn fetch_ollama_models_sets_loaded_from_expires_at() {
+        let app = axum::Router::new().route(
+            "/api/tags",
+            axum::routing::get(|| async {
+                axum::Json(json!({"models": [
+                    {"name": "cold", "model": "cold", "digest": "d"},
+                    {"name": "hot", "model": "hot", "digest": "d", "expires_at": "2026-01-01T00:00:00Z"}
+                ]}))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let client = OllamaClient::new(vec![format!("http://{addr}")]).unwrap();
+        let models = fetch_ollama_models(&client).await;
+        assert_eq!(models.len(), 2);
+        let hot = models.iter().find(|m| m.id == "hot").unwrap();
+        let cold = models.iter().find(|m| m.id == "cold").unwrap();
+        assert_eq!(hot.loaded, Some(true), "expires_at present → loaded");
+        assert_eq!(cold.loaded, Some(false));
     }
 }

@@ -135,7 +135,8 @@ mod tests {
     // ✅ 单后端 /api/tags 拉取与解析
     // ✅ 多后端合并：同名模型 urls 列表聚合；不同模型并存
     // ✅ 后端不可达 → 该后端记空、其余正常（gather 容错）
-    // ✅ 404/500 后端 → 忽略该后端
+    // ✅ 500 后端 → 忽略该后端（含直连报错）；坏 JSON → decode error
+    // ✅ lowest_version：字典序最小（"0.10" < "0.5" 陷阱钉死），死后端忽略
     // ⛔ 刻意不覆盖：认证头（本地 Ollama 无鉴权；api_configs M3）
 
     async fn spawn_ollama_mock(body: Value) -> String {
@@ -195,5 +196,73 @@ mod tests {
         let client = OllamaClient::new(vec!["http://127.0.0.1:1".into()]).unwrap();
         let err = client.tags_from(5).await.unwrap_err();
         assert!(matches!(err, rc_core::Error::BadRequest(_)));
+    }
+
+    #[tokio::test]
+    async fn erroring_backend_500_degrades_to_empty() {
+        let app = axum::Router::new().route(
+            "/api/tags",
+            axum::routing::get(|| async {
+                (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "boom")
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let healthy = spawn_ollama_mock(json!({"models": [
+            {"name": "llama3:8b", "model": "llama3:8b"}
+        ]}))
+        .await;
+        let client = OllamaClient::new(vec![format!("http://{addr}"), healthy]).unwrap();
+        let merged = client.all_tags_merged().await;
+        assert_eq!(
+            merged.len(),
+            1,
+            "the 500 backend must vanish from the merge"
+        );
+        assert_eq!(merged[0]["urls"], json!([1]));
+        // and the direct call surfaces the error
+        let err = client.tags_from(0).await.unwrap_err();
+        assert!(err.to_string().contains("500"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn malformed_tags_json_is_decode_error() {
+        let app = axum::Router::new().route(
+            "/api/tags",
+            axum::routing::get(|| async { r#"{"models": [ truncated"# }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let client = OllamaClient::new(vec![format!("http://{addr}")]).unwrap();
+        let err = client.tags_from(0).await.unwrap_err();
+        assert!(err.to_string().contains("decode failed"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn lowest_version_picks_lexicographic_min_across_backends() {
+        async fn spawn_version(version: &'static str) -> String {
+            let app = axum::Router::new().route(
+                "/api/version",
+                axum::routing::get(move || async move { axum::Json(json!({"version": version})) }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            format!("http://{addr}")
+        }
+        // string comparison pinned (open-webui parity): "0.10" < "0.5"
+        let old = spawn_version("0.10.1").await;
+        let new = spawn_version("0.5.0").await;
+        let client = OllamaClient::new(vec![new, old, "http://127.0.0.1:1".into()]).unwrap();
+        let lowest = client.lowest_version().await.unwrap();
+        assert_eq!(
+            lowest.as_deref(),
+            Some("0.10.1"),
+            "string-min across backends, dead backend ignored"
+        );
     }
 }

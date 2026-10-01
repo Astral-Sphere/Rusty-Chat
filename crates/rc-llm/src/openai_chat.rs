@@ -318,9 +318,12 @@ mod tests {
     // ✅ build_request_body：消息角色映射（system/user/assistant/tool）、
     //    typed 参数（temperature/seed…）、未知参数进 extra_body、params 合并
     // ✅ 流式适配：content/reasoning/tool_calls 分片、末尾 usage chunk
-    //    （choices: []）、Done{finish_reason} 合成
+    //    （choices: []）、Done{finish_reason} 合成、SSE 被任意字节边界
+    //    切碎后仍正确解析（跨 TCP 分块——openai-interface 升级最敏感点）、
+    //    乱序/交错 tool index 聚合、空 delta 跳过
     // ✅ 非流式 complete：聚合为 OpenAI chat.completion 形状
-    // ⛔ 刻意不覆盖：HTTP 错误分支（openai-interface 内部处理，集成层测）
+    // ✅ 错误路径：上游非 200 → Err(provider request failed)；bearer 与
+    //    extra_headers 实际发出（mock 捕获断言）
 
     #[test]
     fn builds_request_body_with_roles_and_params() {
@@ -444,5 +447,242 @@ mod tests {
         assert_eq!(response["choices"][0]["message"]["content"], json!("ok"));
         assert_eq!(response["choices"][0]["finish_reason"], json!("stop"));
         assert!(response["id"].as_str().unwrap().starts_with("chatcmpl-"));
+    }
+
+    fn form() -> ChatCompletionForm {
+        serde_json::from_value(json!({
+            "model": "m", "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .unwrap()
+    }
+
+    /// Drives `stream_chat` against `base_url` and returns (deltas, accumulator).
+    async fn collect(base_url: String) -> (Vec<StreamDelta>, rc_core::chat::OutputAccumulator) {
+        let target = ChatTarget {
+            base_url,
+            api_key: None,
+            extra_headers: Default::default(),
+        };
+        let mut stream = stream_chat(target, &form()).await.unwrap();
+        let mut acc = rc_core::chat::OutputAccumulator::default();
+        let mut deltas = Vec::new();
+        while let Some(delta) = stream.next().await {
+            let delta = delta.unwrap();
+            acc.push(&delta);
+            deltas.push(delta);
+        }
+        (deltas, acc)
+    }
+
+    #[tokio::test]
+    async fn streams_sse_split_across_tcp_chunks() {
+        // the same wire format as streams_and_maps_chunks, but the body is
+        // sliced every 7 bytes — data: lines break mid-JSON and mid-"data:".
+        // Regression fence for openai-interface upgrades (D-011).
+        let sse_lines = [
+            r#"data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"content":"Hel"},"finish_reason":null}]}"#,
+            r#"data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"reasoning_content":"why"},"finish_reason":null}]}"#,
+            r#"data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"content":"lo"},"finish_reason":"stop"}]}"#,
+            r#"data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":null,"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}"#,
+            "data: [DONE]",
+        ];
+        let body = format!("{}\n\n", sse_lines.join("\n\n"));
+        let body_bytes = bytes::Bytes::from_owner(body);
+        let app = axum::Router::new().route(
+            "/chat/completions",
+            axum::routing::post(move || {
+                let body_bytes = body_bytes.clone();
+                async move {
+                    let chunks: Vec<Result<bytes::Bytes, std::io::Error>> = body_bytes
+                        .chunks(7)
+                        .map(|c| Ok(bytes::Bytes::copy_from_slice(c)))
+                        .collect();
+                    axum::http::Response::builder()
+                        .header("content-type", "text/event-stream")
+                        .body(axum::body::Body::from_stream(futures::stream::iter(chunks)))
+                        .unwrap()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let (deltas, acc) = collect(format!("http://{addr}")).await;
+        assert_eq!(acc.content, "Hello");
+        assert_eq!(acc.reasoning, "why");
+        assert_eq!(acc.finish_reason.as_deref(), Some("stop"));
+        assert_eq!(acc.usage, Some((1, 2, Some(3))));
+        assert!(
+            deltas.iter().any(
+                |d| matches!(d, StreamDelta::Done { finish_reason: Some(fr) } if fr == "stop")
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn parallel_tool_calls_aggregate_out_of_order() {
+        // index 1 starts and finishes before index 0 continues; the two
+        // argument streams must not interleave
+        let sse_lines = [
+            r#"data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"f1","function":{"name":"fn_b","arguments":"{\"b\""}}]},"finish_reason":null}]}"#,
+            r#"data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"f0","function":{"name":"fn_a","arguments":"{\"a\""}}]},"finish_reason":null}]}"#,
+            r#"data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"arguments":":1}"}}]},"finish_reason":null}]}"#,
+            r#"data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":":2}"}}]},"finish_reason":"tool_calls"}]}"#,
+            "data: [DONE]",
+        ];
+        let body = format!("{}\n\n", sse_lines.join("\n\n"));
+        let app = axum::Router::new().route(
+            "/chat/completions",
+            axum::routing::post(move || {
+                let body = body.clone();
+                async move {
+                    axum::http::Response::builder()
+                        .header("content-type", "text/event-stream")
+                        .body(axum::body::Body::from(body))
+                        .unwrap()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let (_, acc) = collect(format!("http://{addr}")).await;
+        assert_eq!(acc.tool_calls.len(), 2);
+        // accumulator preserves first-seen order: index 1 arrived first
+        assert_eq!(acc.tool_calls[0].index, 1);
+        assert_eq!(acc.tool_calls[0].arguments, "{\"b\":1}");
+        assert_eq!(acc.tool_calls[1].index, 0);
+        assert_eq!(acc.tool_calls[1].arguments, "{\"a\":2}");
+        assert_eq!(acc.finish_reason.as_deref(), Some("tool_calls"));
+    }
+
+    #[tokio::test]
+    async fn empty_delta_chunks_are_skipped() {
+        let sse_lines = [
+            r#"data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{},"finish_reason":null}]}"#,
+            r#"data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"content":""},"finish_reason":null}]}"#,
+            r#"data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}"#,
+            "data: [DONE]",
+        ];
+        let body = format!("{}\n\n", sse_lines.join("\n\n"));
+        let app = axum::Router::new().route(
+            "/chat/completions",
+            axum::routing::post(move || {
+                let body = body.clone();
+                async move {
+                    axum::http::Response::builder()
+                        .header("content-type", "text/event-stream")
+                        .body(axum::body::Body::from(body))
+                        .unwrap()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let (deltas, acc) = collect(format!("http://{addr}")).await;
+        assert_eq!(acc.content, "ok");
+        let contents: Vec<_> = deltas
+            .iter()
+            .filter(|d| matches!(d, StreamDelta::Content { .. }))
+            .collect();
+        assert_eq!(
+            contents.len(),
+            1,
+            "empty deltas must be dropped: {deltas:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn upstream_500_maps_to_internal_error() {
+        let app = axum::Router::new().route(
+            "/chat/completions",
+            axum::routing::post(|| async {
+                axum::http::Response::builder()
+                    .status(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(axum::body::Body::from("boom"))
+                    .unwrap()
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let target = ChatTarget {
+            base_url: format!("http://{addr}"),
+            api_key: None,
+            extra_headers: Default::default(),
+        };
+        let err = match stream_chat(target, &form()).await {
+            Err(e) => e,
+            Ok(_) => panic!("expected the upstream 500 to fail the request"),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("provider request failed"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn bearer_and_extra_headers_are_sent() {
+        // the mock captures the headers openai-interface actually puts on the
+        // wire, then answers with a minimal SSE so stream_chat completes
+        let captured: std::sync::Arc<tokio::sync::Mutex<Option<(String, String, String)>>> =
+            Default::default();
+        let captured_captured = captured.clone();
+        let app = axum::Router::new().route(
+            "/chat/completions",
+            axum::routing::post(move |headers: axum::http::HeaderMap| {
+                let captured = captured_captured.clone();
+                async move {
+                    let auth = headers
+                        .get(axum::http::header::AUTHORIZATION)
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("")
+                        .to_string();
+                    let title = headers
+                        .get("x-title")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("")
+                        .to_string();
+                    let referer = headers
+                        .get("http-referer")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("")
+                        .to_string();
+                    *captured.lock().await = Some((auth, title, referer));
+                    axum::http::Response::builder()
+                        .header("content-type", "text/event-stream")
+                        .body(axum::body::Body::from("data: [DONE]\n\n"))
+                        .unwrap()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let target = ChatTarget {
+            base_url: format!("http://{addr}"),
+            api_key: Some("sk-x".into()),
+            extra_headers: [
+                ("X-Title".to_string(), "Rusty".to_string()),
+                ("HTTP-Referer".to_string(), "https://rusty".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let mut stream = stream_chat(target, &form()).await.unwrap();
+        while let Some(delta) = stream.next().await {
+            delta.unwrap();
+        }
+        let (auth, title, referer) = captured.lock().await.clone().unwrap();
+        assert_eq!(auth, "Bearer sk-x");
+        assert_eq!(
+            title, "Rusty",
+            "extra headers reach the wire (name case-insensitive)"
+        );
+        assert_eq!(referer, "https://rusty");
     }
 }
