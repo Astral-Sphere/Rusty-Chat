@@ -158,4 +158,29 @@ mod tests {
         assert_eq!(hub.send_to_user("u1", "second"), 1);
         assert_eq!(rx2.try_recv().unwrap(), "second");
     }
+
+    #[test]
+    fn disconnect_unknown_sid_is_noop() {
+        let hub = Hub::new();
+        hub.disconnect(999); // must not panic or corrupt state
+        let (sid, mut rx) = hub.connect("u1");
+        hub.disconnect(999);
+        assert_eq!(hub.send_to_user("u1", "still-here"), 1);
+        assert_eq!(rx.try_recv().unwrap(), "still-here");
+        hub.disconnect(sid);
+    }
+
+    #[test]
+    fn send_to_dropped_receiver_not_counted() {
+        // the WS handler owns rx; if it vanished without a disconnect the
+        // send fails — that failure must not count as a delivery
+        let hub = Hub::new();
+        let (sid, rx) = hub.connect("u1");
+        drop(rx);
+        assert_eq!(hub.send_to_user("u1", "lost"), 0);
+        // session state is unchanged (still "online") until disconnect
+        assert!(hub.is_online("u1"));
+        hub.disconnect(sid);
+        assert!(!hub.is_online("u1"));
+    }
 }

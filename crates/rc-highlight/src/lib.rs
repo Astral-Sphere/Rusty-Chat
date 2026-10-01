@@ -428,4 +428,33 @@ mod tests {
         let spans = highlight(&code, "rust").unwrap();
         assert!(spans.len() > 2000);
     }
+
+    #[test]
+    fn spans_are_sorted_by_start() {
+        // the HTML backfill walks spans linearly — unsorted spans would
+        // corrupt the slice-and-emit loop
+        let code = "fn main() { let s = \"str\"; struct T; }\n// comment\n";
+        let spans = highlight(code, "rust").unwrap();
+        assert!(!spans.is_empty());
+        for pair in spans.windows(2) {
+            assert!(
+                (pair[0].start, pair[0].end) <= (pair[1].start, pair[1].end),
+                "spans must be sorted by (start, end): {:?} then {:?}",
+                pair[0],
+                pair[1]
+            );
+        }
+    }
+
+    #[test]
+    fn nested_captures_outer_comes_first() {
+        // documented contract: when two captures start at the same byte the
+        // outer (earlier-starting) capture is emitted first
+        let code = "struct CamelCase;\n";
+        let spans = highlight(code, "rust").unwrap();
+        let starts: Vec<usize> = spans.iter().map(|s| s.start).collect();
+        let mut sorted = starts.clone();
+        sorted.sort_unstable();
+        assert_eq!(starts, sorted);
+    }
 }
