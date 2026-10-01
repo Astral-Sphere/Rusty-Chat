@@ -393,12 +393,14 @@ pub async fn update_chat_tags(
 }
 
 /// `DELETE /` — delete every chat of the current user.
+/// open-webui returns True unconditionally on success (even when there was
+/// nothing to delete), so the second call is idempotent.
 pub async fn delete_all_chats(
     State(app): State<AppState>,
     VerifiedUser(user): VerifiedUser,
 ) -> Response {
     match chats::delete_chats_by_user_id(&app.db, &user.id).await {
-        Ok(deleted) => Json(json!(deleted)).into_response(),
+        Ok(_) => Json(json!(true)).into_response(),
         Err(e) => bad_request(&e.to_string()),
     }
 }

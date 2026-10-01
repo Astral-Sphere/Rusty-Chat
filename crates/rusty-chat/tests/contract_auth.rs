@@ -6,7 +6,7 @@
 //! ✅ /api/config：匿名形状（status/name/version/features 公共子集）、
 //!   首用户前 onboarding=true、DB seed 默认值（enable_signup=true）
 //! ✅ signup：首用户 → admin + enable_signup 自动关闭；次用户 → pending；
-//!   关闭 signup 后 403；重复 email 400
+//!   关闭 signup 后 403；重复 email 400（含大小写变体）
 //! ✅ signin：正确/错误密码（400 Invalid credentials）；Set-Cookie token
 //! ✅ session：Bearer 携带 → 形状（id/email/name/role/permissions）；
 //!   无凭据 → 401；pending 用户 → 401
@@ -422,6 +422,55 @@ async fn full_auth_flow_contract() {
         cookie.contains("Max-Age=0") || cookie.contains("Expires=Thu, 01 Jan 1970"),
         "cookie cleared: {cookie}"
     );
+}
+
+/// Duplicate email signup → 400 (claimed by the matrix but previously
+/// untested), including the case-insensitive variant (functional unique
+/// index on lower(email)).
+#[tokio::test]
+async fn signup_duplicate_email_returns_400() {
+    let (mut router, app, _dir) = test_app().await;
+    let (status, first, _) = call(
+        &mut router,
+        json_request(
+            "POST",
+            "/api/v1/auths/signup",
+            json!({"name": "A", "email": "dup@example.com", "password": "pw-dup-1"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    // first user auto-disabled signup — the 403 gate fires before the
+    // duplicate check otherwise; re-enable so the 400 path is reachable
+    app.config
+        .upsert("ui.enable_signup", &json!(true))
+        .await
+        .unwrap();
+
+    // exact duplicate
+    let (status, body, _) = call(
+        &mut router,
+        json_request(
+            "POST",
+            "/api/v1/auths/signup",
+            json!({"name": "Dup", "email": "dup@example.com", "password": "pw-dup-2"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["detail"].as_str().is_some(), "{body}");
+
+    // case-insensitive variant collides too
+    let (status, body, _) = call(
+        &mut router,
+        json_request(
+            "POST",
+            "/api/v1/auths/signup",
+            json!({"name": "Dup", "email": "DUP@EXAMPLE.COM", "password": "pw-dup-3"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
 }
 
 #[tokio::test]
