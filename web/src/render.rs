@@ -12,17 +12,22 @@
 //!   code, GFM tables/tasklists/strikethrough/autolink, footnotes,
 //!   superscript, hard line breaks, inline + display math via katex-rs
 //! - boundaries: empty input, whitespace-only, emoji/UTF-8 (CJK, combining
-//!   marks), CRLF line endings, long input, unclosed math (streaming
-//!   cut-off), escaped `\$`, `$` inside inline code and fenced blocks (must
-//!   NOT render as math), math containing HTML-special chars (`<`, `&`,
-//!   quotes), malformed TeX (renders KaTeX error markup, not raw TeX)
+//!   marks), CRLF line endings (also inside fences and display math), long
+//!   input, unclosed math (streaming cut-off), escaped `\$` stays literal,
+//!   `$$a$$b` adjacency, math in table cells / list items, `$ $` is not
+//!   math, `$` inside inline code and fenced blocks (must NOT render as
+//!   math), math containing HTML-special chars (`<`, `&`, quotes), malformed
+//!   TeX (renders KaTeX error markup, not raw TeX)
 //! - error paths: XSS battery — script/iframe/object/embed/style tags, event
-//!   handler attributes, `javascript:`/`data:` URLs in links and images,
-//!   raw HTML passthrough, checkbox inputs other than tasklists
+//!   handler attributes, `javascript:`/`data:`/`vbscript:`/`file:` URLs in
+//!   links and images, scheme obfuscations (mixed case, HTML entities),
+//!   protocol-relative URLs pinned as PassThrough, hostile markup inside
+//!   fences (escaped), incomplete tags, KaTeX TeX injection (\href/
+//!   \includegraphics/\html*/recursive \def/\write/\input — trust=false),
+//!   checkbox inputs other than tasklists
 //! - deliberately not covered: syntax-highlight span backfill (T3 endpoint
-//!   post-processes `<code class="language-x">`), mermaid blocks (T1b),
-//!   `data:` image URIs (scheme whitelist excludes it for v1 — noted for M2
-//!   when multimodal messages land), server-side content policy (M2+).
+//!   post-processes `<code class="language-x">`), mermaid blocks (T1b —
+//!   pinned in mermaid.rs), server-side content policy (M2+).
 
 use katex::{KatexContext, Settings};
 use std::sync::LazyLock;
@@ -92,6 +97,11 @@ fn render_tex(tex: &str, display: bool) -> String {
         // KaTeX renders its own parse errors as colored source text instead
         // of failing — exactly what we want for streaming-cut formulas.
         throw_on_error: false,
+        // self-referential `\def` macros expand until this cap; each
+        // expansion nests the parser deeper, and the default 1000
+        // overflowed even the 8MB host test stack (and would trap the far
+        // smaller wasm stack). Chat TeX never needs more than a handful.
+        max_expand: 32,
         ..Settings::default()
     };
     katex::render_to_string(&KATEX_CTX, tex, &settings)
@@ -414,16 +424,152 @@ mod tests {
 
     #[test]
     fn dangerous_url_schemes_are_stripped() {
-        for (src, attr) in [
-            ("[x](javascript:alert(1))", "href"),
-            ("![x](javascript:alert(1))", "href"),
-            ("[x](data:text/html,<b>)", "href"),
+        for src in [
+            "[x](javascript:alert(1))",
+            "![x](javascript:alert(1))",
+            "[x](data:text/html,<b>)",
         ] {
             let out = render(src);
             assert!(!out.contains("javascript:"), "{src} → {out}");
             assert!(!out.contains("data:text/html"), "{src} → {out}");
-            let _ = attr;
         }
+    }
+
+    #[test]
+    fn url_scheme_obfuscations_are_stripped() {
+        for src in [
+            // mixed case
+            "[x](JaVaScRiPt:alert(1))",
+            // HTML entity obfuscation (ammonia decodes entities while parsing)
+            "[x](&#106;avascript:alert(1))",
+            "[x](javascript&colon;alert(1))",
+            // other dangerous schemes
+            "[x](vbscript:msgbox)",
+            "[x](file:///etc/passwd)",
+            // data: URIs in images (whitelist excludes them for v1)
+            "![pic](data:image/png;base64,AAAA)",
+        ] {
+            let out = render(src);
+            assert!(!out.to_lowercase().contains("javascript:"), "{src} → {out}");
+            assert!(!out.contains("vbscript:"), "{src} → {out}");
+            assert!(!out.contains("file:"), "{src} → {out}");
+            assert!(
+                !out.contains(r#"src="data:"#),
+                "data: image sources must be stripped: {src} → {out}"
+            );
+        }
+        // protocol-relative URLs pass through INTENTIONALLY (UrlRelative::
+        // PassThrough) — they inherit the page scheme (https). Pin it so a
+        // future ammonia bump that changes this is a conscious decision.
+        let out = render("[x](//evil.com/x)");
+        assert!(out.contains(r#"href="//evil.com/x""#), "{out}");
+    }
+
+    #[test]
+    fn hostile_markup_inside_fences_and_incomplete_tags() {
+        // script inside a fenced code block is escaped text, never markup
+        let out = render("```html\n<script>alert(1)</script>\n```");
+        assert!(!out.contains("<script"), "{out}");
+        assert!(out.contains("&lt;script&gt;"), "{out}");
+        // nested fence (four backticks wrapping triple backticks)
+        let out = render("````\n```json\n{\"a\": 1}\n```\n````");
+        assert!(out.contains("```json"), "{out}");
+        // incomplete tags dissolve (comrak drops raw HTML)
+        for src in [
+            "<div",
+            "<img src=x",
+            "<b>x",
+            "<a href='javascript:alert(1)'>y",
+        ] {
+            let out = render(src);
+            assert!(!out.contains("<div"), "{src} → {out}");
+            assert!(!out.contains("<img"), "{src} → {out}");
+            assert!(!out.contains("<b>"), "{src} → {out}");
+            assert!(!out.contains("<a "), "{src} → {out}");
+            assert!(!out.to_lowercase().contains("javascript:"), "{src} → {out}");
+        }
+    }
+
+    /// KaTeX TeX commands that could smuggle HTML/links/IO. katex-rs runs
+    /// with `trust: false` (the default): \href/\includegraphics/\html*
+    /// raise, and KaTeX's error path echoes the raw TeX as ESCAPED text in
+    /// `<annotation>`/error spans — inert. The invariant that matters: user
+    /// TeX never produces a live tag, whatever strings it contains.
+    #[test]
+    fn katex_untrusted_commands_cannot_inject_html() {
+        for tex in [
+            r"$\href{javascript:alert(1)}{x}$",
+            r"$\includegraphics{https://evil.com/x.png}$",
+            r"$\htmlClass{evil-span}{x}$",
+            r"$\htmlId{evil-id}{x}$",
+            r"$\htmlStyle{color:red}{x}$",
+            r"$\htmlData{evil=1}{x}$",
+            // self- and mutually-recursive macros: must terminate via
+            // max_expand (each expansion nests the parser deeper; the
+            // default 1000 overflowed even the 8MB host stack and would
+            // trap the far smaller wasm stack)
+            r"$\def\x{\href{javascript:alert(1)}{\x}}\x$",
+            r"$\def\a{\b}\def\b{\a}\a$",
+            // shell/IO commands never exist in a browser KaTeX
+            r"$\write18{rm -rf}$",
+            r"$\input{|ls}$",
+        ] {
+            let out = render(tex);
+            // no live link/image/script frame escapes the render, no matter
+            // what the echoed error text says
+            assert!(!out.contains("<script"), "{tex} → {out}");
+            assert!(!out.contains("<img"), "{tex} → {out}");
+            assert!(!out.contains("<a "), "{tex} → {out}");
+            assert!(!out.contains("<iframe"), "{tex} → {out}");
+            // no evil class/attribute was attached to real markup: it may
+            // only appear inside the escaped echo (after `&lt;` or `&nbsp;`)
+            if out.contains("evil-span") {
+                assert!(!out.contains(r#"class="evil-span""#), "{tex} → {out}");
+            }
+            // either rendered or turned into the escaped error text — but
+            // always bounded output, never the raw untrusted markup
+            assert!(
+                out.contains("katex") || out.contains("math-error"),
+                "{tex} → {out}"
+            );
+        }
+    }
+
+    #[test]
+    fn katex_error_annotation_escapes_markup() {
+        // KaTeX echoes failing TeX into <annotation> — markup inside that
+        // echo MUST be entity-escaped, or ammonia would parse it back as tags
+        let out = render(r"$\bogus{\text{</annotation><img src=x onerror=y>}}$");
+        assert!(!out.contains("<img"), "{out}");
+        assert!(out.contains("&lt;img"), "markup must be escaped: {out}");
+        let out = render(r"$\bogus{<a href='javascript:x'>c</a>}$");
+        assert!(!out.contains("<a "), "{out}");
+        assert!(out.contains("&lt;a"), "markup must be escaped: {out}");
+    }
+
+    #[test]
+    fn math_boundaries_escaped_dollars_and_positions() {
+        // escaped \$ stays literal text (comrak math_dollars respects \$.)
+        let out = render(r"price: \$5 and \$6 total");
+        assert!(!out.contains("katex"), "{out}");
+        assert!(out.contains("$5"), "{out}");
+        // display math followed immediately by text
+        let out = render("$$a$$b");
+        assert!(out.contains("katex-display"), "{out}");
+        assert!(out.contains('b'), "{out}");
+        // math inside a table cell and a list item renders
+        let out = render("| f |\n|---|\n| $x^2$ |\n\n- item $x_1$");
+        assert!(out.contains("katex"), "{out}");
+        assert!(out.contains("<td"), "{out}");
+        // `$ $` (space-separated bare dollars) is not math
+        let out = render("a $ $ b");
+        assert!(!out.contains("katex"), "{out}");
+        // CRLF inside a fenced block keeps the fence
+        let out = render("```rust\r\nlet x = 1;\r\n```");
+        assert!(out.contains("language-rust"), "{out}");
+        // CRLF inside display math still parses
+        let out = render("$$a +\r\nb$$");
+        assert!(out.contains("katex"), "{out}");
     }
 
     #[test]
