@@ -117,6 +117,13 @@ jwt 错误算法拒绝、repo api_key 级联（被删用户根本没建 key）�
 - DELETE /api/v1/chats 改为无条件 true（对齐 OWU）；全部门禁绿（native 190 + web 86 + 双 clippy/fmt + dx wasm 构建）。
 - 教训：门禁管道用 `| grep/awk` 会吞 cargo 退出码（两次带病提交靠 amend 补救）——**一律用 `> log 2>&1; echo $?` 形式**。
 
+### PG 门控真机验证（2026-10-01，用户跑 just test-pg 后补，174b220）
+用户在本机起 PG fixture 后全套跑通，首轮就揪出 3 个只在 PG 上暴露的缺陷：
+1. `postgres_refuses_legacy_unstamped_database` 里 `CREATE TABLE user`——**user 是 PG 保留字**（42601），须写成 `"user"`（落库仍是小写，LegacyUnstamped 探测不受影响）；SQLite 宽容裸词所以孪生测试从未暴露。
+2. contract 宏的 `PG_LOCK` 守卫放在 pg_test_app **内部**，返回即放锁——flow 无锁运行时，并行测试的 `DROP DATABASE ... FORCE` 会杀掉活连接（随机 400/空结果）。锁改为罩住整个 PG 腿（对齐 rc-db 宏）。
+3. `chat_repair_flow` 的 NUL 脏数据回写段是 **SQLite 特性**——PG 的 TEXT 直接拒绝 0x00（22021）；改为按方言分支，PG 侧以"拒绝写入"即兼容事实记档。
+连续两轮全门控 190/0。沙箱内 podman 仍不可启动，但用户起容器后可从会话直连 127.0.0.1:5433 验证。
+
 ## 阻塞/待办
 
 - LICENSE 未定（D-009）：M1 前不阻塞；公开发布前必须定（注意 openai-interface AGPL 联动）。
